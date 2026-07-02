@@ -1,0 +1,137 @@
+from __future__ import annotations
+
+from collections import defaultdict
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+import xarray as xr
+
+from retrieval_from_space.config import PipelineConfig, ProductSpec
+from retrieval_from_space.data.targets import TARGET, load_target_table, metadata_to_dataarray, target_to_dataarray
+from retrieval_from_space.features.masks import get_cloud_and_land_masks, valid_water_coverage
+from retrieval_from_space.features.transforms import interpolate_dataset, positive_quantile
+
+VARIABLE = "variable"
+ORDERED_CUBE_DIMS = ("Id", "lat", "lon", "time", VARIABLE)
+
+
+def _option(product: ProductSpec, key: str, default: Any) -> Any:
+    return product.preprocess.get(key, default)
+
+
+def _select_time(data: xr.DataArray, limit: int | None) -> xr.DataArray:
+    if limit is None or "time" not in data.dims:
+        return data
+    return data.isel(time=range(min(limit, data.sizes["time"])))
+
+
+def _as_dataarray(ds: xr.Dataset, product: ProductSpec) -> xr.DataArray:
+    variables = product.variables or list(ds.data_vars)
+    variables = [product.rename_variables.get(var, var) for var in variables]
+    ds = ds[variables]
+    if product.rename_variables:
+        rename_map = {old: new for old, new in product.rename_variables.items() if old in ds.data_vars}
+        ds = ds.rename(rename_map)
+    return ds.to_array(dim=VARIABLE)
+
+
+def _prepare_product_array(
+    ds: xr.Dataset,
+    product: ProductSpec,
+    defaults: PipelineConfig,
+) -> xr.DataArray:
+    interpolate_dims = tuple(_option(product, "interpolate_dims", ()))
+    if interpolate_dims:
+        ds = interpolate_dataset(ds, interpolate_dims)
+
+    data = _as_dataarray(ds, product)
+    add_masks = bool(_option(product, "add_cloud_land_masks", defaults.preprocess.add_cloud_land_masks))
+    cloud_mask = land_mask = None
+    if add_masks:
+        cloud_mask, land_mask = get_cloud_and_land_masks(data, variable_dim=VARIABLE)
+
+    quantile = _option(product, "positive_quantile", defaults.preprocess.positive_quantile)
+    if quantile is not None:
+        data = positive_quantile(data, quantile=float(quantile))
+
+    if bool(_option(product, "log", defaults.preprocess.log_products)):
+        data = np.log(data)
+    if bool(_option(product, "log1p", False)):
+        data = np.log1p(data)
+
+    if bool(_option(product, "prefix_variables", defaults.preprocess.prefix_variables)):
+        names = [f"{product.name}:{name}" for name in data[VARIABLE].values]
+        data = data.assign_coords({VARIABLE: names})
+
+    arrays = [data]
+    if cloud_mask is not None and land_mask is not None:
+        arrays.extend([cloud_mask, land_mask])
+    data = xr.concat(arrays, dim=VARIABLE, coords="minimal")
+
+    time_limit = _option(product, "time_limit", defaults.preprocess.time_limit)
+    data = _select_time(data, time_limit)
+
+    ordered_dims = tuple(dim for dim in ORDERED_CUBE_DIMS if dim in data.dims)
+    data = data.transpose(*ordered_dims)
+
+    min_valid_ratio = _option(product, "min_valid_ratio", defaults.preprocess.min_valid_ratio)
+    if min_valid_ratio is not None and "cloud_mask" in data[VARIABLE].values and "land_mask" in data[VARIABLE].values:
+        ratio = valid_water_coverage(data.sel({VARIABLE: "cloud_mask"}), data.sel({VARIABLE: "land_mask"}))
+        data = data.isel(Id=(ratio >= float(min_valid_ratio)).values)
+
+    fillna = _option(product, "fillna", defaults.preprocess.fillna)
+    if fillna is not None:
+        data = data.fillna(fillna)
+    return data
+
+
+def transform_target(data: xr.DataArray, transform: str) -> xr.DataArray:
+    transform = transform.lower()
+    if transform == "none":
+        return data
+    if transform == "log":
+        return np.log(data)
+    if transform == "log1p":
+        return np.log1p(data)
+    raise ValueError(f"Unsupported target transform: {transform}")
+
+
+def preprocess_matchups(config: PipelineConfig, run_root: str | Path) -> dict[str, Path]:
+    run_root = Path(run_root)
+    datasets_dir = run_root / "datasets"
+    datasets_dir.mkdir(parents=True, exist_ok=True)
+
+    target_table_path = run_root / "processed" / "targets.csv"
+    targets = pd.read_csv(target_table_path, parse_dates=["time"]) if target_table_path.exists() else load_target_table(config.target)
+
+    target_da = target_to_dataarray(targets, target_name=TARGET)
+    target_da = transform_target(target_da, config.problem.target_transform)
+    target_path = datasets_dir / "target.nc"
+    target_da.to_netcdf(target_path)
+
+    meta = metadata_to_dataarray(targets, config.target.metadata_columns)
+    meta_path = datasets_dir / "meta.nc"
+    meta.to_netcdf(meta_path)
+
+    grouped: dict[str, list[xr.DataArray]] = defaultdict(list)
+    artifacts: dict[str, Path] = {"target": target_path, "meta": meta_path}
+
+    for product in config.products:
+        matchup_path = run_root / "processed" / "matchups" / f"{product.name}.nc"
+        if not matchup_path.exists():
+            continue
+        ds = xr.load_dataset(matchup_path)
+        group_name = product.feature_group or product.preprocess.get("feature_group") or product.name
+        grouped[group_name].append(_prepare_product_array(ds, product, config))
+
+    for group_name, arrays in grouped.items():
+        if len(arrays) == 1:
+            group = arrays[0]
+        else:
+            group = xr.concat(arrays, dim=VARIABLE, coords="minimal")
+        path = datasets_dir / f"{group_name}.nc"
+        group.to_netcdf(path)
+        artifacts[group_name] = path
+    return artifacts

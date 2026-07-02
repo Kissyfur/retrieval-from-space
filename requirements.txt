@@ -1,0 +1,13 @@
+pandas~=2.1.4
+xarray~=2023.11.0
+numpy~=1.24.4
+tqdm~=4.67.1
+scikit-learn~=1.6.1
+xgboost~=2.1.4
+keras~=2.10.0
+tensorflow~=2.10.1
+matplotlib~=3.9.4
+setuptools~=68.2.2
+PyYAML~=6.0
+openpyxl~=3.1.0
+copernicusmarine~=2.0

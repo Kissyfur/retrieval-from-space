@@ -1,0 +1,54 @@
+run_name: example_classification
+output_root: outputs/runs
+
+target:
+  path: data/raw/example_targets.csv
+  id_column: Id
+  lat_column: lat
+  lon_column: lon
+  time_column: time
+  target_column: target_value
+
+problem:
+  type: classification
+  target_transform: none
+  class_intervals:
+    - [0, 1000]
+    - [1000, 20000]
+    - [20000, 5000000]
+  class_labels: [low, medium, high]
+  test_size: 0.2
+  random_state: 42
+
+matchup:
+  lat_window: 0.06
+  lon_window: 0.06
+  time_window_days: 1
+  lat_threshold: 0.1
+  lon_threshold: 0.1
+  time_threshold_days: 1
+
+preprocess:
+  positive_quantile: 0.01
+  log_products: true
+  add_cloud_land_masks: true
+  fillna: 0.0
+
+model:
+  family: random_forest
+  feature_groups: [meta, optics]
+  params:
+    n_estimators: 300
+    random_state: 42
+
+products:
+  - name: reflectance
+    dataset_id: cmems_obs-oc_med_bgc-reflectance_my_l3-multi-1km_P1D
+    feature_group: optics
+    variables: [RRS412, RRS443, RRS490, RRS510, RRS555, RRS670]
+    rename_dimensions:
+      latitude: lat
+      longitude: lon
+    preprocess:
+      log: true
+      add_cloud_land_masks: true

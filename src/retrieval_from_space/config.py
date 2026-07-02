@@ -1,0 +1,230 @@
+from __future__ import annotations
+
+import json
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any
+
+
+def _read_mapping(path: Path) -> dict[str, Any]:
+    suffix = path.suffix.lower()
+    text = path.read_text(encoding="utf-8")
+    if suffix == ".json":
+        return json.loads(text)
+    if suffix in {".yaml", ".yml"}:
+        try:
+            import yaml
+        except ImportError as exc:
+            raise ImportError(
+                "YAML configs require PyYAML. Install project requirements or use JSON."
+            ) from exc
+        data = yaml.safe_load(text)
+        return {} if data is None else data
+    raise ValueError(f"Unsupported config format: {path.suffix}")
+
+
+def _as_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+@dataclass
+class TargetConfig:
+    path: str
+    target_column: str
+    id_column: str = "Id"
+    lat_column: str = "lat"
+    lon_column: str = "lon"
+    time_column: str = "time"
+    sheet_name: str | int | None = None
+    metadata_columns: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "TargetConfig":
+        return cls(
+            path=str(data["path"]),
+            target_column=str(data["target_column"]),
+            id_column=str(data.get("id_column", "Id")),
+            lat_column=str(data.get("lat_column", "lat")),
+            lon_column=str(data.get("lon_column", "lon")),
+            time_column=str(data.get("time_column", "time")),
+            sheet_name=data.get("sheet_name"),
+            metadata_columns=list(data.get("metadata_columns", [])),
+        )
+
+
+@dataclass
+class ProductSpec:
+    name: str
+    dataset_ids: list[str]
+    source: str = "copernicus"
+    source_path: str | None = None
+    variables: list[str] = field(default_factory=list)
+    feature_group: str | None = None
+    open_dataset_kwargs: dict[str, Any] = field(default_factory=dict)
+    rename_dimensions: dict[str, str] = field(
+        default_factory=lambda: {"latitude": "lat", "longitude": "lon"}
+    )
+    rename_variables: dict[str, str] = field(default_factory=dict)
+    preprocess: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ProductSpec":
+        dataset_ids = data.get("dataset_ids", data.get("dataset_id"))
+        return cls(
+            name=str(data["name"]),
+            dataset_ids=[str(v) for v in _as_list(dataset_ids)],
+            source=str(data.get("source", "copernicus")).lower(),
+            source_path=str(data["source_path"]) if data.get("source_path") is not None else None,
+            variables=[str(v) for v in data.get("variables", [])],
+            feature_group=data.get("feature_group"),
+            open_dataset_kwargs=dict(data.get("open_dataset_kwargs", {})),
+            rename_dimensions=dict(
+                data.get("rename_dimensions", {"latitude": "lat", "longitude": "lon"})
+            ),
+            rename_variables=dict(data.get("rename_variables", {})),
+            preprocess=dict(data.get("preprocess", {})),
+        )
+
+
+@dataclass
+class MatchupConfig:
+    lat_window: float = 0.06
+    lon_window: float = 0.06
+    time_window_days: int = 1
+    lat_threshold: float = 0.1
+    lon_threshold: float = 0.1
+    time_threshold_days: int = 1
+    require_full_time_window: bool = False
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "MatchupConfig":
+        data = {} if data is None else data
+        return cls(
+            lat_window=float(data.get("lat_window", 0.06)),
+            lon_window=float(data.get("lon_window", 0.06)),
+            time_window_days=int(data.get("time_window_days", 1)),
+            lat_threshold=float(data.get("lat_threshold", 0.1)),
+            lon_threshold=float(data.get("lon_threshold", 0.1)),
+            time_threshold_days=int(data.get("time_threshold_days", 1)),
+            require_full_time_window=bool(data.get("require_full_time_window", False)),
+        )
+
+
+@dataclass
+class PreprocessConfig:
+    positive_quantile: float | None = 0.01
+    log_products: bool = True
+    add_cloud_land_masks: bool = True
+    fillna: float | None = 0.0
+    min_valid_ratio: float | None = None
+    time_limit: int | None = None
+    prefix_variables: bool = False
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "PreprocessConfig":
+        data = {} if data is None else data
+        return cls(
+            positive_quantile=data.get("positive_quantile", 0.01),
+            log_products=bool(data.get("log_products", True)),
+            add_cloud_land_masks=bool(data.get("add_cloud_land_masks", True)),
+            fillna=data.get("fillna", 0.0),
+            min_valid_ratio=data.get("min_valid_ratio"),
+            time_limit=data.get("time_limit"),
+            prefix_variables=bool(data.get("prefix_variables", False)),
+        )
+
+
+@dataclass
+class ProblemConfig:
+    type: str | None = None
+    target_transform: str = "none"
+    class_intervals: list[list[float]] = field(default_factory=list)
+    class_labels: list[str] = field(default_factory=list)
+    test_size: float = 0.2
+    random_state: int = 42
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "ProblemConfig":
+        data = {} if data is None else data
+        problem_type = data.get("type")
+        if problem_type is not None:
+            problem_type = str(problem_type).lower()
+            if problem_type not in {"classification", "regression"}:
+                raise ValueError("problem.type must be 'classification' or 'regression'.")
+        return cls(
+            type=problem_type,
+            target_transform=str(data.get("target_transform", "none")).lower(),
+            class_intervals=[list(map(float, v)) for v in data.get("class_intervals", [])],
+            class_labels=[str(v) for v in data.get("class_labels", [])],
+            test_size=float(data.get("test_size", 0.2)),
+            random_state=int(data.get("random_state", 42)),
+        )
+
+
+@dataclass
+class ModelConfig:
+    family: str = "random_forest"
+    feature_groups: list[str] = field(default_factory=list)
+    params: dict[str, Any] = field(default_factory=dict)
+    standardize: bool = False
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "ModelConfig":
+        data = {} if data is None else data
+        return cls(
+            family=str(data.get("family", "random_forest")).lower(),
+            feature_groups=[str(v) for v in data.get("feature_groups", [])],
+            params=dict(data.get("params", {})),
+            standardize=bool(data.get("standardize", False)),
+        )
+
+
+@dataclass
+class PipelineConfig:
+    target: TargetConfig
+    products: list[ProductSpec]
+    output_root: str = "outputs/runs"
+    run_id: str | None = None
+    run_name: str | None = None
+    run_version: str = "v0"
+    matchup: MatchupConfig = field(default_factory=MatchupConfig)
+    preprocess: PreprocessConfig = field(default_factory=PreprocessConfig)
+    problem: ProblemConfig = field(default_factory=ProblemConfig)
+    model: ModelConfig = field(default_factory=ModelConfig)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "PipelineConfig":
+        if "target" not in data:
+            raise ValueError("Config must contain a 'target' section.")
+        if "products" not in data or not data["products"]:
+            raise ValueError("Config must contain at least one Copernicus product.")
+        return cls(
+            target=TargetConfig.from_dict(data["target"]),
+            products=[ProductSpec.from_dict(p) for p in data["products"]],
+            output_root=str(data.get("output_root", "outputs/runs")),
+            run_id=data.get("run_id"),
+            run_name=data.get("run_name"),
+            run_version=str(data.get("run_version", "v0")),
+            matchup=MatchupConfig.from_dict(data.get("matchup")),
+            preprocess=PreprocessConfig.from_dict(data.get("preprocess")),
+            problem=ProblemConfig.from_dict(data.get("problem")),
+            model=ModelConfig.from_dict(data.get("model")),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def load_config(path: str | Path) -> PipelineConfig:
+    path = Path(path)
+    return PipelineConfig.from_dict(_read_mapping(path))
+
+
+def write_config_snapshot(config: PipelineConfig, path: str | Path) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(config.to_dict(), indent=2), encoding="utf-8")

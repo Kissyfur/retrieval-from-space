@@ -1,0 +1,67 @@
+run_name: example_regression
+output_root: outputs/runs
+
+target:
+  path: data/raw/example_targets.csv
+  id_column: Id
+  lat_column: lat
+  lon_column: lon
+  time_column: time
+  target_column: target_value
+  metadata_columns: []
+
+problem:
+  type: regression
+  target_transform: none
+  test_size: 0.2
+  random_state: 42
+
+matchup:
+  lat_window: 0.06
+  lon_window: 0.06
+  time_window_days: 1
+  lat_threshold: 0.1
+  lon_threshold: 0.1
+  time_threshold_days: 1
+  require_full_time_window: false
+
+preprocess:
+  positive_quantile: 0.01
+  log_products: true
+  add_cloud_land_masks: true
+  fillna: 0.0
+  prefix_variables: false
+
+model:
+  family: random_forest
+  feature_groups: []
+  standardize: false
+  params:
+    n_estimators: 300
+    random_state: 42
+
+products:
+  - name: reflectance
+    dataset_id: cmems_obs-oc_med_bgc-reflectance_my_l3-multi-1km_P1D
+    feature_group: optics
+    variables: [RRS412, RRS443, RRS490, RRS510, RRS555, RRS670]
+    rename_dimensions:
+      latitude: lat
+      longitude: lon
+    rename_variables:
+      RRS443: RRS442
+      RRS555: RRS560
+      RRS670: RRS673
+    preprocess:
+      log: true
+      add_cloud_land_masks: true
+
+  - name: nutrients
+    dataset_ids:
+      - cmems_mod_med_bgc-nut_my_4.2km_P1D-m
+      - cmems_mod_med_bgc-nut_anfc_4.2km_P1D-m
+    feature_group: nut
+    preprocess:
+      interpolate_dims: [lat, lon, time]
+      log1p: true
+      log: false
