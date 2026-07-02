@@ -1,0 +1,76 @@
+run_name: synthetic_end_to_end
+run_version: v1
+output_root: outputs/runs
+
+target:
+  path: examples/synthetic/generated/targets.csv
+  id_column: Id
+  lat_column: lat
+  lon_column: lon
+  time_column: time
+  target_column: target_value
+  metadata_columns: []
+
+problem:
+  type: regression
+  target_transform: none
+  test_size: 0.25
+  random_state: 42
+
+matchup:
+  lat_window: 0.08
+  lon_window: 0.08
+  time_window_days: 1
+  lat_threshold: 0.03
+  lon_threshold: 0.03
+  time_threshold_days: 1
+  require_full_time_window: true
+
+preprocess:
+  positive_quantile:
+  log_products: false
+  add_cloud_land_masks: true
+  fillna: 0.0
+  prefix_variables: false
+
+model:
+  family: random_forest
+  feature_groups: [meta, optics, phy]
+  standardize: false
+  params:
+    n_estimators: 40
+    random_state: 42
+    n_jobs: -1
+
+products:
+  - name: synthetic_reflectance
+    source: local
+    source_path: examples/synthetic/generated/copernicus_like/synthetic_reflectance_source.nc
+    dataset_id: synthetic://reflectance
+    feature_group: optics
+    variables: [RRS443, RRS555, CHL]
+    rename_dimensions:
+      latitude: lat
+      longitude: lon
+    rename_variables:
+      RRS443: rrs_443
+      RRS555: rrs_555
+      CHL: chl
+    preprocess:
+      positive_quantile:
+      log: false
+      add_cloud_land_masks: true
+
+  - name: synthetic_physics
+    source: local
+    source_path: examples/synthetic/generated/copernicus_like/synthetic_physics_source.nc
+    dataset_id: synthetic://physics
+    feature_group: phy
+    variables: [temp, sal, uo, vo]
+    rename_dimensions:
+      latitude: lat
+      longitude: lon
+    preprocess:
+      positive_quantile:
+      log: false
+      add_cloud_land_masks: true
