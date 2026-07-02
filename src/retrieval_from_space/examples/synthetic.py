@@ -96,6 +96,8 @@ def create_synthetic_example(
                 "time": times[ti].date().isoformat(),
                 "target_value": target_value,
                 "station": f"S{obs_id % 4}",
+                "sampling_depth": float((obs_id % 3) * 5),
+                "field_temperature": float(temperature[ti, yi, xi] + rng.normal(0.0, 0.1)),
             }
         )
 
