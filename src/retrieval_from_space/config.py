@@ -166,20 +166,68 @@ class ProblemConfig:
 
 
 @dataclass
-class ModelConfig:
+class HyperparameterSearchConfig:
+    enabled: bool = False
+    cv: int = 3
+    scoring: str | None = None
+    candidates: list[dict[str, Any]] = field(default_factory=list)
+    param_grid: dict[str, list[Any]] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "HyperparameterSearchConfig":
+        data = {} if data is None else data
+        return cls(
+            enabled=bool(data.get("enabled", False)),
+            cv=int(data.get("cv", 3)),
+            scoring=data.get("scoring"),
+            candidates=[dict(v) for v in data.get("candidates", [])],
+            param_grid=dict(data.get("param_grid", {})),
+        )
+
+
+@dataclass
+class ModelStageConfig:
     family: str = "random_forest"
     feature_groups: list[str] = field(default_factory=list)
     params: dict[str, Any] = field(default_factory=dict)
     standardize: bool = False
+    hyperparameter_search: HyperparameterSearchConfig = field(default_factory=HyperparameterSearchConfig)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any] | None) -> "ModelConfig":
+    def from_dict(cls, data: dict[str, Any] | None) -> "ModelStageConfig":
         data = {} if data is None else data
         return cls(
             family=str(data.get("family", "random_forest")).lower(),
             feature_groups=[str(v) for v in data.get("feature_groups", [])],
             params=dict(data.get("params", {})),
             standardize=bool(data.get("standardize", False)),
+            hyperparameter_search=HyperparameterSearchConfig.from_dict(data.get("hyperparameter_search")),
+        )
+
+
+@dataclass
+class ModelConfig(ModelStageConfig):
+    strategy: str = "direct"
+    include_base_prediction: bool = True
+    base_model: ModelStageConfig | None = None
+    final_model: ModelStageConfig | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "ModelConfig":
+        data = {} if data is None else data
+        strategy = str(data.get("strategy", "direct")).lower()
+        if strategy not in {"direct", "stacking", "residual_correction"}:
+            raise ValueError("model.strategy must be 'direct', 'stacking', or 'residual_correction'.")
+        return cls(
+            family=str(data.get("family", "random_forest")).lower(),
+            feature_groups=[str(v) for v in data.get("feature_groups", [])],
+            params=dict(data.get("params", {})),
+            standardize=bool(data.get("standardize", False)),
+            hyperparameter_search=HyperparameterSearchConfig.from_dict(data.get("hyperparameter_search")),
+            strategy=strategy,
+            include_base_prediction=bool(data.get("include_base_prediction", True)),
+            base_model=ModelStageConfig.from_dict(data["base_model"]) if data.get("base_model") else None,
+            final_model=ModelStageConfig.from_dict(data["final_model"]) if data.get("final_model") else None,
         )
 
 
