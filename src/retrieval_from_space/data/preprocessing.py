@@ -140,8 +140,25 @@ def transform_target(data: xr.DataArray, transform: str) -> xr.DataArray:
     if transform == "none":
         return data
     if transform == "log":
+        invalid_count = int((data <= 0).sum().item())
+        if invalid_count:
+            min_value = float(data.min(skipna=True).item())
+            raise ValueError(
+                "Cannot apply problem.target_transform: log because the target contains "
+                f"{invalid_count} non-positive values. Minimum target value: {min_value}. "
+                "Use target_transform: log1p with log1p-based class intervals, set "
+                "target_transform: none if the target is already logged, or filter/remove "
+                "non-positive target rows before preprocessing."
+            )
         return np.log(data)
     if transform == "log1p":
+        invalid_count = int((data <= -1).sum().item())
+        if invalid_count:
+            min_value = float(data.min(skipna=True).item())
+            raise ValueError(
+                "Cannot apply problem.target_transform: log1p because the target contains "
+                f"{invalid_count} values less than or equal to -1. Minimum target value: {min_value}."
+            )
         return np.log1p(data)
     raise ValueError(f"Unsupported target transform: {transform}")
 

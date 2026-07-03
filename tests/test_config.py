@@ -3,6 +3,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 import xarray as xr
 
 from retrieval_from_space.config import ModelStageConfig, PipelineConfig, ProductSpec, TargetConfig, load_config
@@ -12,7 +13,7 @@ from retrieval_from_space.paths import RunPaths
 from retrieval_from_space.pipeline.download import download_products
 from retrieval_from_space.pipeline.matchup import create_matchups
 from retrieval_from_space.state import PipelineState
-from retrieval_from_space.data.preprocessing import preprocess_matchups
+from retrieval_from_space.data.preprocessing import preprocess_matchups, transform_target
 from retrieval_from_space.features.transforms import positive_quantile
 
 
@@ -72,6 +73,17 @@ def test_positive_quantile_replaces_zero_with_finite_log_floor():
 
     assert float(floored.min()) > 0
     assert np.isfinite(np.log(floored.values)).all()
+
+
+def test_target_log_transform_rejects_zero_values():
+    target = xr.DataArray(
+        np.array([[0.0], [10.0]], dtype=np.float32),
+        dims=("Id", "variable"),
+        coords={"Id": [1, 2], "variable": ["target"]},
+    )
+
+    with pytest.raises(ValueError, match="target_transform: log"):
+        transform_target(target, "log")
 
 
 def test_remote_download_writes_marker_without_materializing_dataset(tmp_path):
