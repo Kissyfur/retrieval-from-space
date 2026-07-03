@@ -20,6 +20,7 @@ from retrieval_from_space.models.training import _load_matrix_for_groups
 from retrieval_from_space.models.training import _target_for_stage
 from retrieval_from_space.models.training import _augment_training_data
 from retrieval_from_space.models.training import _make_sample_weights
+from retrieval_from_space.models.training import train_final_model
 from retrieval_from_space.models.training import train_model
 from retrieval_from_space.models.cnn import KerasCNN3DEstimator
 from retrieval_from_space.paths import RunPaths
@@ -522,10 +523,18 @@ def test_multi_base_stacking_saves_stage_metrics(tmp_path):
 
     assert artifacts["base_optics_metrics"] == run_root / "metrics" / "base_optics_metrics.json"
     assert artifacts["base_physics_metrics"] == run_root / "metrics" / "base_physics_metrics.json"
+    assert artifacts["base_optics_signals"] == run_root / "metrics" / "base_optics_signals.npz"
+    assert artifacts["base_physics_signals"] == run_root / "metrics" / "base_physics_signals.npz"
     assert [stage["name"] for stage in stage_metrics["stages"]] == ["optics", "physics", "final"]
     assert "train_oof_metrics" in stage_metrics["stages"][0]
     assert "base_optics_signal" in predictions.columns
     assert "base_physics_signal" in predictions.columns
+
+    final_artifacts = train_final_model(config, run_root)
+    refreshed_stage_metrics = json.loads((run_root / "metrics" / "stage_metrics.json").read_text())
+
+    assert final_artifacts["final_metrics"] == run_root / "metrics" / "final_metrics.json"
+    assert [stage["name"] for stage in refreshed_stage_metrics["stages"]] == ["optics", "physics", "final"]
 
 
 def test_keras_cnn_estimator_exposes_classes_for_sklearn_scorers():

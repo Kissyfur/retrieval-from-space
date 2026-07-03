@@ -699,6 +699,54 @@ def _save_named_stage_metrics(
     return _write_json(paths["metrics"] / f"{_stage_slug(stage_name)}_metrics.json", payload)
 
 
+def _ids_as_str(ids) -> np.ndarray:
+    return np.asarray(list(map(str, ids)))
+
+
+def _save_base_signals(
+    paths: dict[str, Path],
+    base_name: str,
+    split_ids,
+    train_signal: np.ndarray,
+    test_signal: np.ndarray,
+) -> Path:
+    path = paths["metrics"] / f"base_{_stage_slug(base_name)}_signals.npz"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        path,
+        train_ids=_ids_as_str(split_ids["train"]),
+        test_ids=_ids_as_str(split_ids["test"]),
+        train_signal=np.asarray(train_signal),
+        test_signal=np.asarray(test_signal),
+    )
+    return path
+
+
+def _load_base_signals(paths: dict[str, Path], base_name: str, split_ids) -> tuple[np.ndarray, np.ndarray]:
+    path = paths["metrics"] / f"base_{_stage_slug(base_name)}_signals.npz"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Missing base signal file for {base_name}: {path}. "
+            "Run `bin/train_model.py --stage base` first."
+        )
+    payload = np.load(path)
+    expected_train = _ids_as_str(split_ids["train"])
+    expected_test = _ids_as_str(split_ids["test"])
+    if payload["train_ids"].tolist() != expected_train.tolist() or payload["test_ids"].tolist() != expected_test.tolist():
+        raise ValueError(
+            f"Base signal split for {base_name} does not match the current config/run split. "
+            "Use the same config, run id, and random_state, or retrain the base stage."
+        )
+    return np.asarray(payload["train_signal"]), np.asarray(payload["test_signal"])
+
+
+def _load_stage_report(paths: dict[str, Path], stage_name: str) -> dict[str, Any] | None:
+    path = paths["metrics"] / f"{_stage_slug(stage_name)}_metrics.json"
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def _save_common_outputs(
     paths: dict[str, Path],
     problem_type: str,
@@ -839,6 +887,109 @@ def _train_direct(
     return artifacts
 
 
+def _fit_base_stage(
+    config: PipelineConfig,
+    problem_type: str,
+    paths: dict[str, Path],
+    split_ids,
+    y_train,
+    y_test_target,
+    y_train_labels,
+    y_test_labels,
+    label_values,
+    base_name: str,
+    base_stage: ModelStageConfig,
+) -> dict[str, Any]:
+    slug = _stage_slug(base_name)
+    stage_label = f"base:{base_name}"
+    train_metric_target = _metric_target(problem_type, y_train, y_train_labels)
+    test_metric_target = _metric_target(problem_type, y_test_target, y_test_labels)
+
+    x_base_train, base_groups = _load_matrix_for_groups(
+        paths["datasets"], split_ids["train"], base_stage.feature_groups, base_stage
+    )
+    x_base_test, _ = _load_matrix_for_groups(
+        paths["datasets"], split_ids["test"], base_stage.feature_groups, base_stage
+    )
+    base_y_train = _target_for_stage(problem_type, base_stage, y_train, y_train_labels)
+
+    base_params, base_cv_results = _select_params(
+        problem_type,
+        base_stage,
+        x_base_train,
+        base_y_train,
+        config.problem.random_state,
+        split_labels=y_train_labels if problem_type == "classification" else None,
+        score_labels=y_train_labels if problem_type == "classification" else None,
+        stage_name=stage_label,
+    )
+    oof_cv = max(2, base_stage.hyperparameter_search.cv if base_stage.hyperparameter_search.enabled else 5)
+    base_oof_signal = _out_of_fold_signal(
+        problem_type,
+        base_stage,
+        x_base_train,
+        base_y_train,
+        base_params,
+        config.problem.random_state,
+        oof_cv,
+        split_labels=y_train_labels if problem_type == "classification" else None,
+        stage_name=stage_label,
+    )
+    base_model, base_scaler = _fit_estimator(
+        problem_type,
+        base_stage,
+        x_base_train,
+        base_y_train,
+        base_params,
+        y_labels=y_train_labels if problem_type == "classification" else None,
+        random_state=config.problem.random_state,
+        progress_description=f"{stage_label} final fit",
+    )
+    base_test_signal = _predict_signal(
+        problem_type, base_model, _transform_with_scaler(x_base_test, base_scaler)
+    )
+
+    base_train_pred = _prediction_labels(problem_type, base_oof_signal)
+    base_test_pred = _prediction_labels(problem_type, base_test_signal)
+    base_train_metrics = _evaluate(problem_type, train_metric_target, base_train_pred, label_values)
+    base_test_metrics = _evaluate(problem_type, test_metric_target, base_test_pred, label_values)
+    base_report = {
+        "stage": "base",
+        "name": base_name,
+        "family": base_stage.family,
+        "feature_groups": base_groups,
+        "selected_params": base_params,
+        "cv_results": base_cv_results,
+        "oof_cv": oof_cv,
+        "training": _training_info(base_model),
+        "train_oof_metrics": base_train_metrics,
+        "test_metrics": base_test_metrics,
+    }
+
+    artifacts = {
+        f"base_{slug}_{key}": value
+        for key, value in _save_stage_artifacts(
+            paths["models"] / "base" / slug,
+            base_model,
+            base_scaler,
+            base_params,
+            base_cv_results,
+        ).items()
+    }
+    artifacts[f"base_{slug}_metrics"] = _save_named_stage_metrics(paths, f"base_{slug}", base_report)
+    artifacts[f"base_{slug}_signals"] = _save_base_signals(
+        paths, base_name, split_ids, base_oof_signal, base_test_signal
+    )
+    return {
+        "artifacts": artifacts,
+        "report": base_report,
+        "groups": base_groups,
+        "params": base_params,
+        "train_signal": base_oof_signal,
+        "test_signal": base_test_signal,
+    }
+
+
 def _train_stacked_or_residual(
     config: PipelineConfig,
     problem_type: str,
@@ -876,86 +1027,28 @@ def _train_stacked_or_residual(
 
     base_stage_items = list(base_stages.items())
     for base_name, base_stage in tqdm(base_stage_items, desc="Base model stages", unit="stage"):
-        slug = _stage_slug(base_name)
-        stage_label = f"base:{base_name}"
-        x_base_train, base_groups = _load_matrix_for_groups(
-            paths["datasets"], split_ids["train"], base_stage.feature_groups, base_stage
-        )
-        x_base_test, _ = _load_matrix_for_groups(
-            paths["datasets"], split_ids["test"], base_stage.feature_groups, base_stage
-        )
-        base_y_train = _target_for_stage(problem_type, base_stage, y_train, y_train_labels)
-
-        base_params, base_cv_results = _select_params(
+        result = _fit_base_stage(
+            config,
             problem_type,
+            paths,
+            split_ids,
+            y_train,
+            y_test_target,
+            y_train_labels,
+            y_test_labels,
+            label_values,
+            base_name,
             base_stage,
-            x_base_train,
-            base_y_train,
-            config.problem.random_state,
-            split_labels=y_train_labels if problem_type == "classification" else None,
-            score_labels=y_train_labels if problem_type == "classification" else None,
-            stage_name=stage_label,
         )
-        oof_cv = max(2, base_stage.hyperparameter_search.cv if base_stage.hyperparameter_search.enabled else 5)
-        base_oof_signal = _out_of_fold_signal(
-            problem_type,
-            base_stage,
-            x_base_train,
-            base_y_train,
-            base_params,
-            config.problem.random_state,
-            oof_cv,
-            split_labels=y_train_labels if problem_type == "classification" else None,
-            stage_name=stage_label,
-        )
-        base_model, base_scaler = _fit_estimator(
-            problem_type,
-            base_stage,
-            x_base_train,
-            base_y_train,
-            base_params,
-            y_labels=y_train_labels if problem_type == "classification" else None,
-            random_state=config.problem.random_state,
-            progress_description=f"{stage_label} final fit",
-        )
-        base_test_signal = _predict_signal(
-            problem_type, base_model, _transform_with_scaler(x_base_test, base_scaler)
-        )
-
-        base_train_pred = _prediction_labels(problem_type, base_oof_signal)
-        base_test_pred = _prediction_labels(problem_type, base_test_signal)
-        base_train_metrics = _evaluate(problem_type, train_metric_target, base_train_pred, label_values)
-        base_test_metrics = _evaluate(problem_type, test_metric_target, base_test_pred, label_values)
-        base_report = {
-            "stage": "base",
-            "name": base_name,
-            "family": base_stage.family,
-            "feature_groups": base_groups,
-            "selected_params": base_params,
-            "cv_results": base_cv_results,
-            "oof_cv": oof_cv,
-            "training": _training_info(base_model),
-            "train_oof_metrics": base_train_metrics,
-            "test_metrics": base_test_metrics,
-        }
+        artifacts.update(result["artifacts"])
+        base_report = result["report"]
+        base_groups = result["groups"]
+        base_params = result["params"]
         base_reports.append(base_report)
         base_group_payload[base_name] = base_groups
         base_param_payload[base_name] = base_params
-        base_train_signals.append((base_name, base_oof_signal))
-        base_test_signals.append((base_name, base_test_signal))
-
-        artifacts.update(
-            {f"base_{slug}_{k}": v for k, v in _save_stage_artifacts(
-                paths["models"] / "base" / slug,
-                base_model,
-                base_scaler,
-                base_params,
-                base_cv_results,
-            ).items()}
-        )
-        artifacts[f"base_{slug}_metrics"] = _save_named_stage_metrics(
-            paths, f"base_{slug}", base_report
-        )
+        base_train_signals.append((base_name, result["train_signal"]))
+        base_test_signals.append((base_name, result["test_signal"]))
 
     if config.model.include_base_prediction:
         x_final_train = np.hstack([signal for _, signal in base_train_signals] + [x_final_train_meta])
@@ -1102,8 +1195,7 @@ def _train_stacked_or_residual(
     return artifacts
 
 
-def train_model(config: PipelineConfig, run_root: str | Path, interactive: bool = False) -> dict[str, Path]:
-    problem_type = resolve_problem_type(config, interactive=interactive)
+def _training_paths(run_root: str | Path) -> dict[str, Path]:
     run_root = Path(run_root)
     paths = {
         "datasets": run_root / "datasets",
@@ -1113,7 +1205,11 @@ def train_model(config: PipelineConfig, run_root: str | Path, interactive: bool 
     }
     for path in paths.values():
         path.mkdir(parents=True, exist_ok=True)
+    return paths
 
+
+def _prepare_training_inputs(config: PipelineConfig, paths: dict[str, Path], interactive: bool = False):
+    problem_type = resolve_problem_type(config, interactive=interactive)
     ids, y_raw = _load_training_data(paths["datasets"], config)
     y_target, y_labels, label_values, label_encoder = _prepare_labels(problem_type, y_raw, config)
     stratify = y_labels if problem_type == "classification" else None
@@ -1130,26 +1226,319 @@ def train_model(config: PipelineConfig, run_root: str | Path, interactive: bool 
     if label_encoder is not None:
         with (paths["models"] / "label_encoder.pkl").open("wb") as f:
             pickle.dump(label_encoder, f)
+    return {
+        "problem_type": problem_type,
+        "split_ids": split_ids,
+        "y_train": y_train,
+        "y_test_target": y_test_target,
+        "y_train_labels": y_train_labels,
+        "y_test_labels": y_test_labels,
+        "label_values": label_values,
+    }
+
+
+def train_base_models(
+    config: PipelineConfig,
+    run_root: str | Path,
+    base_names: list[str] | None = None,
+    interactive: bool = False,
+) -> dict[str, Path]:
+    paths = _training_paths(run_root)
+    context = _prepare_training_inputs(config, paths, interactive=interactive)
+    problem_type = context["problem_type"]
+    if config.model.strategy == "direct":
+        raise ValueError("Base-stage training is only available for stacked or residual strategies.")
+    base_stages = _configured_base_stages(config.model)
+    selected_names = list(base_stages) if not base_names else base_names
+    missing = [name for name in selected_names if name not in base_stages]
+    if missing:
+        raise ValueError(f"Unknown base model name(s): {missing}. Available: {list(base_stages)}")
+
+    artifacts: dict[str, Path] = {}
+    reports = []
+    group_payload = {}
+    param_payload = {}
+    for base_name in tqdm(selected_names, desc="Requested base stages", unit="stage"):
+        result = _fit_base_stage(
+            config,
+            problem_type,
+            paths,
+            context["split_ids"],
+            context["y_train"],
+            context["y_test_target"],
+            context["y_train_labels"],
+            context["y_test_labels"],
+            context["label_values"],
+            base_name,
+            base_stages[base_name],
+        )
+        artifacts.update(result["artifacts"])
+        reports.append(result["report"])
+        group_payload[base_name] = result["groups"]
+        param_payload[base_name] = result["params"]
+
+    stage_report = {
+        "strategy": config.model.strategy,
+        "stage": "base",
+        "problem_type": problem_type,
+        "class_encoding": config.problem.class_encoding,
+        "trained_base_models": selected_names,
+        "base_feature_groups": group_payload,
+        "base_selected_params": param_payload,
+        "stages": reports,
+    }
+    artifacts.update(
+        {
+            "base_stage_report": _write_json(paths["reports"] / "base_training_report.json", stage_report),
+            "base_stage_metrics": _write_json(paths["metrics"] / "base_stage_metrics.json", stage_report),
+        }
+    )
+    return artifacts
+
+
+def _load_base_reports_and_signals(config: PipelineConfig, paths: dict[str, Path], split_ids):
+    base_stages = _configured_base_stages(config.model)
+    base_reports = []
+    base_train_signals = []
+    base_test_signals = []
+    base_group_payload = {}
+    base_param_payload = {}
+    for base_name, base_stage in base_stages.items():
+        train_signal, test_signal = _load_base_signals(paths, base_name, split_ids)
+        base_train_signals.append((base_name, train_signal))
+        base_test_signals.append((base_name, test_signal))
+        report = _load_stage_report(paths, f"base_{_stage_slug(base_name)}") or {
+            "stage": "base",
+            "name": base_name,
+            "family": base_stage.family,
+            "feature_groups": base_stage.feature_groups,
+        }
+        base_reports.append(report)
+        base_group_payload[base_name] = report.get("feature_groups", base_stage.feature_groups)
+        base_param_payload[base_name] = report.get("selected_params", {})
+    return base_reports, base_train_signals, base_test_signals, base_group_payload, base_param_payload
+
+
+def _train_final_from_base_signals(
+    config: PipelineConfig,
+    problem_type: str,
+    paths: dict[str, Path],
+    split_ids,
+    y_train,
+    y_test_target,
+    y_train_labels,
+    y_test_labels,
+    label_values,
+    base_reports,
+    base_train_signals,
+    base_test_signals,
+    base_group_payload,
+    base_param_payload,
+) -> dict[str, Path]:
+    strategy = config.model.strategy
+    if strategy == "residual_correction" and problem_type != "regression":
+        raise ValueError("Residual correction is only supported for regression problems.")
+    if strategy == "residual_correction" and len(base_train_signals) != 1:
+        raise ValueError("Residual correction supports exactly one base model.")
+    final_stage = config.model.final_model or ModelStageConfig(feature_groups=["meta"])
+    x_final_train_meta, final_groups = _load_matrix_for_groups(
+        paths["datasets"], split_ids["train"], final_stage.feature_groups, final_stage
+    )
+    x_final_test_meta, _ = _load_matrix_for_groups(
+        paths["datasets"], split_ids["test"], final_stage.feature_groups, final_stage
+    )
+    if config.model.include_base_prediction:
+        x_final_train = np.hstack([signal for _, signal in base_train_signals] + [x_final_train_meta])
+        x_final_test = np.hstack([signal for _, signal in base_test_signals] + [x_final_test_meta])
+    else:
+        x_final_train = x_final_train_meta
+        x_final_test = x_final_test_meta
+
+    if strategy == "residual_correction":
+        final_y_train = y_train - base_train_signals[0][1].reshape(-1)
+        final_problem_type = "regression"
+    else:
+        final_problem_type = problem_type
+        final_y_train = _target_for_stage(final_problem_type, final_stage, y_train, y_train_labels)
+
+    final_params, final_cv_results = _select_params(
+        final_problem_type,
+        final_stage,
+        x_final_train,
+        final_y_train,
+        config.problem.random_state,
+        split_labels=y_train_labels if final_problem_type == "classification" else None,
+        score_labels=y_train_labels if final_problem_type == "classification" else None,
+        stage_name="final",
+    )
+    final_model, final_scaler = _fit_estimator(
+        final_problem_type,
+        final_stage,
+        x_final_train,
+        final_y_train,
+        final_params,
+        y_labels=y_train_labels if final_problem_type == "classification" else None,
+        random_state=config.problem.random_state,
+        progress_description="final fit",
+    )
+    x_final_test_proc = _transform_with_scaler(x_final_test, final_scaler)
+    final_raw_pred = final_model.predict(x_final_test_proc)
+    final_signal = None
+    if strategy == "residual_correction":
+        y_pred = base_test_signals[0][1].reshape(-1) + final_raw_pred
+    elif problem_type == "classification":
+        final_signal = _predict_signal(problem_type, final_model, x_final_test_proc)
+        y_pred = _classification_labels(final_signal)
+    else:
+        y_pred = final_raw_pred
+
+    train_metric_target = _metric_target(problem_type, y_train, y_train_labels)
+    test_metric_target = _metric_target(problem_type, y_test_target, y_test_labels)
+    x_final_train_proc = _transform_with_scaler(x_final_train, final_scaler)
+    if strategy == "residual_correction":
+        final_train_pred = base_train_signals[0][1].reshape(-1) + final_model.predict(x_final_train_proc)
+    elif problem_type == "classification":
+        final_train_pred = _classification_labels(_predict_signal(problem_type, final_model, x_final_train_proc))
+    else:
+        final_train_pred = final_model.predict(x_final_train_proc)
+
+    metrics = _evaluate(problem_type, test_metric_target, y_pred, label_values)
+    final_train_metrics = _evaluate(problem_type, train_metric_target, final_train_pred, label_values)
+    split_distribution = (
+        {"train": _class_distribution(y_train_labels), "test": _class_distribution(y_test_labels)}
+        if problem_type == "classification"
+        else None
+    )
+    artifacts: dict[str, Path] = {}
+    artifacts.update(
+        {f"final_{key}": value for key, value in _save_stage_artifacts(
+            paths["models"] / "final", final_model, final_scaler, final_params, final_cv_results
+        ).items()}
+    )
+    artifacts["model"] = artifacts["final_model"]
+    base_prediction_columns = []
+    extra_prediction_columns = {}
+    for base_name, base_test_signal in base_test_signals:
+        column_name = f"base_{_stage_slug(base_name)}_signal"
+        extra_prediction_columns[column_name] = base_test_signal
+        width = base_test_signal.shape[1] if base_test_signal.ndim > 1 else 1
+        if width == 1:
+            base_prediction_columns.append(column_name)
+        else:
+            base_prediction_columns.extend(f"{column_name}_{idx}" for idx in range(width))
+    if problem_type == "classification" and strategy != "residual_correction":
+        if final_signal is not None and final_signal.ndim > 1 and final_signal.shape[1] > 1:
+            extra_prediction_columns["final_class_probability"] = final_signal
+        if np.asarray(y_test_target).ndim > 1:
+            extra_prediction_columns["target_probability"] = y_test_target
+    final_report = {
+        "stage": "final",
+        "name": "final",
+        "family": final_stage.family,
+        "feature_groups": final_groups,
+        "base_prediction_columns": base_prediction_columns,
+        "selected_params": final_params,
+        "cv_results": final_cv_results,
+        "training": _training_info(final_model),
+        "train_metrics": final_train_metrics,
+        "test_metrics": metrics,
+    }
+    training_report = {
+        "strategy": strategy,
+        "problem_type": problem_type,
+        "class_encoding": config.problem.class_encoding,
+        "class_distribution": split_distribution,
+        "base_models": {
+            name: {"feature_groups": base_group_payload.get(name, [])}
+            for name, _ in base_train_signals
+        },
+        "final_model": {
+            "family": final_stage.family,
+            "feature_groups": final_groups,
+            "base_prediction_columns": base_prediction_columns,
+        },
+        "stages": list(base_reports) + [final_report],
+        "final_metrics": metrics,
+    }
+    artifacts["final_metrics"] = _save_named_stage_metrics(paths, "final", final_report)
+    artifacts.update(_save_training_report(paths, training_report))
+    artifacts.update(
+        _save_common_outputs(
+            paths,
+            problem_type,
+            split_ids["test"],
+            test_metric_target,
+            y_pred,
+            metrics,
+            {
+                "strategy": strategy,
+                "train_ids": list(map(str, split_ids["train"])),
+                "test_ids": list(map(str, split_ids["test"])),
+                "base_feature_groups": base_group_payload,
+                "final_feature_groups": final_groups,
+                "include_base_prediction": config.model.include_base_prediction,
+                "base_selected_params": base_param_payload,
+                "final_selected_params": final_params,
+                "base_prediction_columns": base_prediction_columns,
+                "class_distribution": split_distribution,
+                "class_encoding": config.problem.class_encoding,
+            },
+            extra_prediction_columns=extra_prediction_columns,
+        )
+    )
+    return artifacts
+
+
+def train_final_model(config: PipelineConfig, run_root: str | Path, interactive: bool = False) -> dict[str, Path]:
+    if config.model.strategy == "direct":
+        raise ValueError("Final-stage training from base signals is only available for stacked or residual strategies.")
+    paths = _training_paths(run_root)
+    context = _prepare_training_inputs(config, paths, interactive=interactive)
+    base_reports, base_train_signals, base_test_signals, base_group_payload, base_param_payload = _load_base_reports_and_signals(
+        config, paths, context["split_ids"]
+    )
+    return _train_final_from_base_signals(
+        config,
+        context["problem_type"],
+        paths,
+        context["split_ids"],
+        context["y_train"],
+        context["y_test_target"],
+        context["y_train_labels"],
+        context["y_test_labels"],
+        context["label_values"],
+        base_reports,
+        base_train_signals,
+        base_test_signals,
+        base_group_payload,
+        base_param_payload,
+    )
+
+
+def train_model(config: PipelineConfig, run_root: str | Path, interactive: bool = False) -> dict[str, Path]:
+    paths = _training_paths(run_root)
+    context = _prepare_training_inputs(config, paths, interactive=interactive)
+    problem_type = context["problem_type"]
 
     if config.model.strategy == "direct":
         x_train, group_names = _load_matrix_for_groups(
-            paths["datasets"], train_ids, config.model.feature_groups, config.model
+            paths["datasets"], context["split_ids"]["train"], config.model.feature_groups, config.model
         )
         x_test, _ = _load_matrix_for_groups(
-            paths["datasets"], test_ids, config.model.feature_groups, config.model
+            paths["datasets"], context["split_ids"]["test"], config.model.feature_groups, config.model
         )
         return _train_direct(
             config,
             problem_type,
             paths,
-            split_ids,
+            context["split_ids"],
             x_train,
             x_test,
-            y_train,
-            y_test_target,
-            y_train_labels,
-            y_test_labels,
-            label_values,
+            context["y_train"],
+            context["y_test_target"],
+            context["y_train_labels"],
+            context["y_test_labels"],
+            context["label_values"],
             group_names,
         )
 
@@ -1157,10 +1546,10 @@ def train_model(config: PipelineConfig, run_root: str | Path, interactive: bool 
         config,
         problem_type,
         paths,
-        split_ids,
-        y_train,
-        y_test_target,
-        y_train_labels,
-        y_test_labels,
-        label_values,
+        context["split_ids"],
+        context["y_train"],
+        context["y_test_target"],
+        context["y_train_labels"],
+        context["y_test_labels"],
+        context["label_values"],
     )
