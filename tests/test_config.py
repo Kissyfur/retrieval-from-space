@@ -41,6 +41,7 @@ def test_load_pseudonitzschia_cnn_classification_config():
     assert config.problem.type == "classification"
     assert config.problem.class_encoding == "soft_probabilities"
     assert config.problem.soft_label_temperature == 10.0
+    assert config.problem.target_transform_offset == 100.0
     assert config.matchup.time_window_days == 14
     assert config.model.family == "cnn3d"
     assert config.model.feature_groups == ["optics"]
@@ -84,6 +85,18 @@ def test_target_log_transform_rejects_zero_values():
 
     with pytest.raises(ValueError, match="target_transform: log"):
         transform_target(target, "log")
+
+
+def test_target_log_transform_accepts_offset_for_zero_values():
+    target = xr.DataArray(
+        np.array([[0.0], [10.0]], dtype=np.float32),
+        dims=("Id", "variable"),
+        coords={"Id": [1, 2], "variable": ["target"]},
+    )
+
+    transformed = transform_target(target, "log", offset=100.0)
+
+    assert np.allclose(transformed.values.reshape(-1), np.log([100.0, 110.0]))
 
 
 def test_remote_download_writes_marker_without_materializing_dataset(tmp_path):

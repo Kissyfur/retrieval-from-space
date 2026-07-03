@@ -144,6 +144,7 @@ class PreprocessConfig:
 class ProblemConfig:
     type: str | None = None
     target_transform: str = "none"
+    target_transform_offset: float = 0.0
     class_intervals: list[list[float]] = field(default_factory=list)
     class_labels: list[str] = field(default_factory=list)
     class_encoding: str = "hard"
@@ -177,6 +178,7 @@ class ProblemConfig:
         return cls(
             type=problem_type,
             target_transform=str(data.get("target_transform", "none")).lower(),
+            target_transform_offset=float(data.get("target_transform_offset", 0.0)),
             class_intervals=[list(map(float, v)) for v in data.get("class_intervals", [])],
             class_labels=[str(v) for v in data.get("class_labels", [])],
             class_encoding=class_encoding,

@@ -93,6 +93,8 @@ Use `class_encoding: one_hot` for categorical neural-network targets, or
 `class_encoding: soft_probabilities` to create smooth interval probabilities:
 
 ```yaml
+target_transform: log
+target_transform_offset: 100.0
 class_encoding: soft_probabilities
 soft_label_temperature: 10.0
 soft_label_prior: 1.0
@@ -100,7 +102,9 @@ soft_label_prior: 1.0
 
 The hard class labels are still used for stratified splits and classification
 metrics. See `configs/pseudonitzschia_cnn_classification.yaml` for the CNN
-classification setup copied from the previous notebook.
+classification setup copied from the previous notebook. When using a target
+offset, class intervals must be defined in the same transformed space, for
+example `log(count + 100)`.
 
 ## Configuration
 

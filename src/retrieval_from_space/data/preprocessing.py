@@ -135,31 +135,34 @@ def _prepare_product_array(
     return data
 
 
-def transform_target(data: xr.DataArray, transform: str) -> xr.DataArray:
+def transform_target(data: xr.DataArray, transform: str, offset: float = 0.0) -> xr.DataArray:
     transform = transform.lower()
     if transform == "none":
         return data
     if transform == "log":
-        invalid_count = int((data <= 0).sum().item())
+        shifted = data + offset
+        invalid_count = int((shifted <= 0).sum().item())
         if invalid_count:
             min_value = float(data.min(skipna=True).item())
             raise ValueError(
                 "Cannot apply problem.target_transform: log because the target contains "
-                f"{invalid_count} non-positive values. Minimum target value: {min_value}. "
-                "Use target_transform: log1p with log1p-based class intervals, set "
-                "target_transform: none if the target is already logged, or filter/remove "
-                "non-positive target rows before preprocessing."
+                f"{invalid_count} values where target + offset is non-positive. "
+                f"Minimum target value: {min_value}; offset: {offset}. Use a larger "
+                "problem.target_transform_offset, set target_transform: none if the target "
+                "is already logged, or filter/remove invalid target rows before preprocessing."
             )
-        return np.log(data)
+        return np.log(shifted)
     if transform == "log1p":
-        invalid_count = int((data <= -1).sum().item())
+        shifted = data + offset
+        invalid_count = int((shifted <= -1).sum().item())
         if invalid_count:
             min_value = float(data.min(skipna=True).item())
             raise ValueError(
                 "Cannot apply problem.target_transform: log1p because the target contains "
-                f"{invalid_count} values less than or equal to -1. Minimum target value: {min_value}."
+                f"{invalid_count} values where target + offset is less than or equal to -1. "
+                f"Minimum target value: {min_value}; offset: {offset}."
             )
-        return np.log1p(data)
+        return np.log1p(shifted)
     raise ValueError(f"Unsupported target transform: {transform}")
 
 
@@ -172,7 +175,11 @@ def preprocess_matchups(config: PipelineConfig, run_root: str | Path) -> dict[st
     targets = pd.read_csv(target_table_path, parse_dates=["time"]) if target_table_path.exists() else load_target_table(config.target)
 
     target_da = target_to_dataarray(targets, target_name=TARGET)
-    target_da = transform_target(target_da, config.problem.target_transform)
+    target_da = transform_target(
+        target_da,
+        config.problem.target_transform,
+        offset=config.problem.target_transform_offset,
+    )
     target_path = datasets_dir / "target.nc"
     target_da.to_netcdf(target_path)
 

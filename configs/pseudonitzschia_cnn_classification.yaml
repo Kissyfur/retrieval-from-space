@@ -14,12 +14,14 @@ target:
 problem:
   type: classification
   # Use "none" if the target column is already log-transformed like the notebook NetCDF.
+  # For raw counts, this applies log(ps_counts + 100) so zero-count samples stay finite.
   target_transform: log
-  # Natural-log intervals copied from the notebook's np.log([...]) class intervals.
+  target_transform_offset: 100.0
+  # Natural-log intervals copied from the notebook thresholds, shifted as log(count + 100).
   class_intervals:
-    - [2.30258509299405, 6.90775527898214]
-    - [6.90775527898214, 11.5129254649702]
-    - [11.5129254649702, 16.5235607590665]
+    - [4.700480365792417, 7.003065458786462]
+    - [7.003065458786462, 11.513924965303312]
+    - [11.513924965303312, 16.52356742571093]
   class_labels: [low, medium, high]
   # Set to "one_hot" to reproduce the notebook's executed one-hot labels.
   # "soft_probabilities" uses smooth interval probabilities for gentler class transitions.
@@ -372,9 +374,9 @@ cnn_training:
       make_sample_weight: true
       class_encoding: soft_probabilities
       class_intervals:
-        - [2.30258509299405, 6.90775527898214]
-        - [6.90775527898214, 11.5129254649702]
-        - [11.5129254649702, 16.5235607590665]
+        - [4.700480365792417, 7.003065458786462]
+        - [7.003065458786462, 11.513924965303312]
+        - [11.513924965303312, 16.52356742571093]
       temperature: 10.0
       hyperparameter_space:
         - dims: [4, 4, 4]
@@ -413,9 +415,9 @@ cnn_training:
       make_sample_weight: true
       class_encoding: soft_probabilities
       class_intervals:
-        - [2.30258509299405, 6.90775527898214]
-        - [6.90775527898214, 11.5129254649702]
-        - [11.5129254649702, 16.5235607590665]
+        - [4.700480365792417, 7.003065458786462]
+        - [7.003065458786462, 11.513924965303312]
+        - [11.513924965303312, 16.52356742571093]
       temperature: 10.0
       hyperparameter_space:
         - dims: [8, 4, 4]
