@@ -227,6 +227,65 @@ def test_preprocess_combines_products_with_different_absolute_time_coords(tmp_pa
     assert group["time"].values.tolist() == [0, 1]
 
 
+def test_preprocess_keeps_common_ids_within_feature_group(tmp_path):
+    paths = RunPaths(tmp_path / "run").ensure()
+    targets = pd.DataFrame(
+        {
+            "Id": [1, 2],
+            "lat": [40.0, 41.0],
+            "lon": [1.0, 2.0],
+            "time": [pd.Timestamp("2020-01-15"), pd.Timestamp("2020-01-16")],
+            "target": [1.0, 2.0],
+        }
+    )
+    targets.to_csv(paths.processed / "targets.csv", index=False)
+
+    def write_matchup(product_name: str, variable_name: str, ids: list[int]) -> None:
+        values = np.ones((len(ids), 2, 2, 2), dtype=np.float32)
+        dates = pd.date_range("2020-01-01", periods=2)
+        ds = xr.Dataset(
+            {variable_name: (("Id", "lat", "lon", "time"), values)},
+            coords={"Id": ids, "lat": [0, 1], "lon": [0, 1], "time": [0, 1]},
+        )
+        ds = ds.assign_coords(
+            {
+                "lat": xr.DataArray(np.tile([40.0, 40.01], (len(ids), 1)), dims=["Id", "lat"]),
+                "lon": xr.DataArray(np.tile([1.0, 1.01], (len(ids), 1)), dims=["Id", "lon"]),
+                "time": xr.DataArray(np.tile(dates.values, (len(ids), 1)), dims=["Id", "time"]),
+            }
+        )
+        ds.to_netcdf(paths.matchups / f"{product_name}.nc")
+
+    write_matchup("product_a", "a", [1, 2])
+    write_matchup("product_b", "b", [2])
+
+    config = PipelineConfig(
+        target=TargetConfig(path=str(tmp_path / "unused.csv"), target_column="target"),
+        products=[
+            ProductSpec(
+                name="product_a",
+                dataset_ids=["unused-a"],
+                variables=["a"],
+                feature_group="optics",
+                preprocess={"positive_quantile": None, "log": False, "add_cloud_land_masks": False},
+            ),
+            ProductSpec(
+                name="product_b",
+                dataset_ids=["unused-b"],
+                variables=["b"],
+                feature_group="optics",
+                preprocess={"positive_quantile": None, "log": False, "add_cloud_land_masks": False},
+            ),
+        ],
+    )
+
+    artifacts = preprocess_matchups(config, paths.root)
+    group = xr.load_dataarray(artifacts["optics"])
+
+    assert group["Id"].values.tolist() == [2]
+    assert group.sizes["variable"] == 2
+
+
 def test_cnn3d_loader_preserves_cube_shape(tmp_path):
     datasets_dir = tmp_path / "datasets"
     datasets_dir.mkdir()

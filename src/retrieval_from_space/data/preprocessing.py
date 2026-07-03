@@ -59,6 +59,27 @@ def _drop_duplicate_mask_variables(data: xr.DataArray) -> xr.DataArray:
     return data.isel({VARIABLE: keep_indices})
 
 
+def _ordered_common_ids(arrays: list[xr.DataArray], group_name: str) -> np.ndarray:
+    if not arrays or any("Id" not in array.dims for array in arrays):
+        return np.array([])
+    first_ids = arrays[0]["Id"].values
+    other_id_sets = [set(array["Id"].values.tolist()) for array in arrays[1:]]
+    common_ids = [id_ for id_ in first_ids if all(id_ in ids for ids in other_id_sets)]
+    if not common_ids:
+        raise ValueError(
+            f"No common Id values remain after preprocessing products in feature group '{group_name}'. "
+            "Check unmatched observations and product-level valid-data filters."
+        )
+    return np.asarray(common_ids, dtype=first_ids.dtype)
+
+
+def _align_to_common_ids(arrays: list[xr.DataArray], group_name: str) -> list[xr.DataArray]:
+    if len(arrays) <= 1 or any("Id" not in array.dims for array in arrays):
+        return arrays
+    common_ids = _ordered_common_ids(arrays, group_name)
+    return [array.sel(Id=common_ids) for array in arrays]
+
+
 def _as_dataarray(ds: xr.Dataset, product: ProductSpec) -> xr.DataArray:
     variables = product.variables or list(ds.data_vars)
     variables = [product.rename_variables.get(var, var) for var in variables]
@@ -199,6 +220,7 @@ def preprocess_matchups(config: PipelineConfig, run_root: str | Path) -> dict[st
         grouped[group_name].append(_prepare_product_array(ds, product, config))
 
     for group_name, arrays in grouped.items():
+        arrays = _align_to_common_ids(arrays, group_name)
         if len(arrays) == 1:
             group = arrays[0]
         else:
