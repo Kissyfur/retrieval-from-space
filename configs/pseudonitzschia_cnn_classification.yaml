@@ -55,62 +55,85 @@ preprocess:
 model:
   strategy: stacking
   include_base_prediction: true
-  base_model:
-    family: cnn3d
-    feature_groups: [optics]
-    standardize: true
-    params:
-      output_dim: 3
-      loss: categorical_crossentropy
-      final_activation: softmax
-      seed: 42
-      metrics: [accuracy]
-
-    hyperparameter_search:
-      enabled: true
-      cv: 3
-      scoring: f1_macro
-      candidates:
-        - dims: [4, 4, 4]
-          kernel_sizes:
-            - [2, 2, 7]
-            - [3, 3, 10]
-            - [5, 5, 12]
-            - [5, 5, 15]
-          output_dim: 3
-          dropout: 0.0
-          reg_factor: 0.001
-          learning_rate: 0.0001
-          name: s
-          metrics: [accuracy]
-
-        - dims: [4, 4, 4, 4]
-          kernel_sizes:
-            - [2, 2, 7]
-            - [3, 3, 10]
-            - [5, 5, 12]
-            - [7, 7, 15]
-          output_dim: 3
-          dropout: 0.0
-          reg_factor: 0.001
-          learning_rate: 0.0001
-          name: m
-          metrics: [accuracy]
-
-        - dims: [4, 4, 4, 4, 4]
-          kernel_sizes:
-            - [2, 2, 7]
-            - [3, 3, 10]
-            - [5, 5, 12]
-            - [7, 7, 15]
-            - [9, 9, 15]
-          output_dim: 3
-          dropout: 0.0
-          reg_factor: 0.001
-          learning_rate: 0.0001
-          name: m
-          metrics: [accuracy]
-
+  base_models:
+    optics:
+      family: cnn3d
+      feature_groups: [optics]
+      standardize: true
+      params:
+        output_dim: 3
+        loss: categorical_crossentropy
+        final_activation: softmax
+        seed: 42
+        metrics: [accuracy]
+      hyperparameter_search:
+        enabled: true
+        cv: 3
+        scoring: f1_macro
+        candidates:
+          - dims: [4, 4, 4]
+            kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [5, 5, 15]]
+            output_dim: 3
+            dropout: 0.0
+            reg_factor: 0.001
+            learning_rate: 0.0001
+            name: s
+            metrics: [accuracy]
+          - dims: [4, 4, 4, 4]
+            kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [7, 7, 15]]
+            output_dim: 3
+            dropout: 0.0
+            reg_factor: 0.001
+            learning_rate: 0.0001
+            name: m
+            metrics: [accuracy]
+          - dims: [4, 4, 4, 4, 4]
+            kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [7, 7, 15], [9, 9, 15]]
+            output_dim: 3
+            dropout: 0.0
+            reg_factor: 0.001
+            learning_rate: 0.0001
+            name: m
+            metrics: [accuracy]
+    environment:
+      family: cnn3d
+      feature_groups: [nut, car, phy]
+      standardize: true
+      params:
+        output_dim: 3
+        loss: categorical_crossentropy
+        final_activation: softmax
+        seed: 42
+        metrics: [accuracy]
+      hyperparameter_search:
+        enabled: true
+        cv: 3
+        scoring: f1_macro
+        candidates:
+          - dims: [8, 4, 4]
+            kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12]]
+            output_dim: 3
+            dropout: 0.0
+            reg_factor: 0.0001
+            learning_rate: 0.0001
+            name: s
+            metrics: [accuracy]
+          - dims: [16, 8, 4, 4]
+            kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [5, 5, 15]]
+            output_dim: 3
+            dropout: 0.0
+            reg_factor: 0.0001
+            learning_rate: 0.0001
+            name: m
+            metrics: [accuracy]
+          - dims: [64, 64, 16, 4, 4]
+            kernel_sizes: [[2, 2, 7], [2, 2, 7], [3, 3, 10], [5, 5, 12], [5, 5, 15]]
+            output_dim: 3
+            dropout: 0.0
+            reg_factor: 0.0001
+            learning_rate: 0.0001
+            name: l
+            metrics: [accuracy]
   final_model:
     family: random_forest
     feature_groups: [meta]

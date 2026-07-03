@@ -6,10 +6,19 @@ import pandas as pd
 import pytest
 import xarray as xr
 
-from retrieval_from_space.config import ModelStageConfig, PipelineConfig, ProductSpec, TargetConfig, load_config
+from retrieval_from_space.config import (
+    ModelConfig,
+    ModelStageConfig,
+    PipelineConfig,
+    ProblemConfig,
+    ProductSpec,
+    TargetConfig,
+    load_config,
+)
 from retrieval_from_space.models.training import interval_soft_labeling
 from retrieval_from_space.models.training import _load_matrix_for_groups
 from retrieval_from_space.models.training import _target_for_stage
+from retrieval_from_space.models.training import train_model
 from retrieval_from_space.models.cnn import KerasCNN3DEstimator
 from retrieval_from_space.paths import RunPaths
 from retrieval_from_space.pipeline.download import download_products
@@ -49,17 +58,22 @@ def test_load_pseudonitzschia_cnn_classification_config():
         np.asarray(config.problem.class_intervals)[:, 0],
         np.log([100.0, 1000.0, 100000.0]),
     )
-    assert config.target.metadata_columns == ["tem", "sal", "o_perc", "o", "ph"]
+    assert config.target.metadata_columns == ["tem", "sal", "o_perc", "o", "ph", "lat", "lon"]
     assert config.target.include_spatial_metadata is False
     assert config.target.include_day_metadata is False
     assert config.target.include_cyclic_day_metadata is True
     assert config.matchup.time_window_days == 14
     assert config.model.strategy == "stacking"
-    assert config.model.base_model.family == "cnn3d"
-    assert config.model.base_model.feature_groups == ["optics"]
+    assert sorted(config.model.base_models) == ["environment", "optics"]
+    assert config.model.base_models["optics"].family == "cnn3d"
+    assert config.model.base_models["optics"].feature_groups == ["optics"]
+    assert config.model.base_models["environment"].family == "cnn3d"
+    assert config.model.base_models["environment"].feature_groups == ["nut", "car", "phy"]
+    assert config.model.base_model is None
     assert config.model.final_model.family == "random_forest"
     assert config.model.final_model.feature_groups == ["meta"]
-    assert len(config.model.base_model.hyperparameter_search.candidates) == 3
+    assert len(config.model.base_models["optics"].hyperparameter_search.candidates) == 3
+    assert len(config.model.base_models["environment"].hyperparameter_search.candidates) == 3
     assert config.products[0].name == "reflectance"
     assert config.products[0].preprocess["mask_kinds"] == ["cloud_mask", "land_mask"]
     assert config.products[0].preprocess["min_valid_ratio"] == 0.3
@@ -369,6 +383,66 @@ def test_cnn3d_loader_preserves_cube_shape(tmp_path):
 
     assert cnn_x.shape == (2, 2, 2, 2, 3)
     assert tree_x.shape == (2, 24)
+
+
+def test_multi_base_stacking_saves_stage_metrics(tmp_path):
+    run_root = tmp_path / "run"
+    datasets_dir = run_root / "datasets"
+    datasets_dir.mkdir(parents=True)
+    ids = np.arange(12)
+    target_values = ids.astype(float)
+
+    xr.DataArray(
+        target_values.reshape(-1, 1),
+        dims=("Id", "variable"),
+        coords={"Id": ids, "variable": ["target"]},
+    ).to_netcdf(datasets_dir / "target.nc")
+
+    for group, offset in [("optics", 0.0), ("phy", 1.0), ("meta", 2.0)]:
+        values = np.column_stack([target_values + offset, target_values * 0.5 + offset])
+        xr.DataArray(
+            values,
+            dims=("Id", "variable"),
+            coords={"Id": ids, "variable": [f"{group}_a", f"{group}_b"]},
+        ).to_netcdf(datasets_dir / f"{group}.nc")
+
+    config = PipelineConfig(
+        target=TargetConfig(path=str(tmp_path / "unused.csv"), target_column="target"),
+        products=[],
+        problem=ProblemConfig(type="regression", test_size=0.25, random_state=42),
+        model=ModelConfig(
+            strategy="stacking",
+            include_base_prediction=True,
+            base_models={
+                "optics": ModelStageConfig(
+                    family="random_forest",
+                    feature_groups=["optics"],
+                    params={"n_estimators": 3, "random_state": 42},
+                ),
+                "physics": ModelStageConfig(
+                    family="random_forest",
+                    feature_groups=["phy"],
+                    params={"n_estimators": 3, "random_state": 43},
+                ),
+            },
+            final_model=ModelStageConfig(
+                family="random_forest",
+                feature_groups=["meta"],
+                params={"n_estimators": 3, "random_state": 44},
+            ),
+        ),
+    )
+
+    artifacts = train_model(config, run_root)
+    stage_metrics = json.loads((run_root / "metrics" / "stage_metrics.json").read_text())
+    predictions = pd.read_csv(run_root / "metrics" / "predictions.csv")
+
+    assert artifacts["base_optics_metrics"] == run_root / "metrics" / "base_optics_metrics.json"
+    assert artifacts["base_physics_metrics"] == run_root / "metrics" / "base_physics_metrics.json"
+    assert [stage["name"] for stage in stage_metrics["stages"]] == ["optics", "physics", "final"]
+    assert "train_oof_metrics" in stage_metrics["stages"][0]
+    assert "base_optics_signal" in predictions.columns
+    assert "base_physics_signal" in predictions.columns
 
 
 def test_keras_cnn_estimator_exposes_classes_for_sklearn_scorers():
