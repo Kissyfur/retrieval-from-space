@@ -27,6 +27,7 @@ def build_cnn3d(
     seed: int = 42,
     final_activation: str = "linear",
     metrics=None,
+    weighted_metrics=None,
     name: str = "cnn3d",
     **kwargs,
 ):
@@ -34,6 +35,7 @@ def build_cnn3d(
     import tensorflow as tf
 
     metrics = [] if metrics is None else metrics
+    weighted_metrics = [] if weighted_metrics is None else weighted_metrics
     np.random.seed(seed)
     tf.random.set_seed(seed)
     random.seed(seed)
@@ -62,7 +64,12 @@ def build_cnn3d(
             kernel_regularizer=keras.regularizers.l2(reg_factor),
         )
     )
-    model.compile(loss=loss, optimizer=keras.optimizers.Adam(learning_rate=learning_rate), metrics=metrics)
+    model.compile(
+        loss=loss,
+        optimizer=keras.optimizers.Adam(learning_rate=learning_rate),
+        metrics=metrics,
+        weighted_metrics=weighted_metrics,
+    )
     return model
 
 
@@ -88,6 +95,7 @@ class KerasCNN3DEstimator:
             "seed",
             "final_activation",
             "metrics",
+            "weighted_metrics",
             "name",
         }
         fit_keys = {"epochs", "batch_size", "patience", "validation_split", "verbose"}
