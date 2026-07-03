@@ -3,7 +3,7 @@ run_version: v1
 output_root: outputs/runs
 
 target:
-  path: data/raw/pseudonitzschia_targets.csv
+  path: data/pseudonitzschia_targets.csv
   id_column: Id
   lat_column: lat
   lon_column: lon
