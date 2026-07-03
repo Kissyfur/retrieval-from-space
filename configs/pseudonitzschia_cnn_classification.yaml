@@ -9,7 +9,7 @@ target:
   lon_column: lon
   time_column: time
   target_column: ps_counts
-  metadata_columns: [tem, sal, o_perc, o, ph]
+  metadata_columns: [tem, sal, o_perc, o, ph, lat, lon]
   include_spatial_metadata: false
   include_day_metadata: false
   include_cyclic_day_metadata: true
