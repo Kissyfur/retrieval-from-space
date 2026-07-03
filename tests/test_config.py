@@ -18,6 +18,8 @@ from retrieval_from_space.config import (
 from retrieval_from_space.models.training import interval_soft_labeling
 from retrieval_from_space.models.training import _load_matrix_for_groups
 from retrieval_from_space.models.training import _target_for_stage
+from retrieval_from_space.models.training import _augment_training_data
+from retrieval_from_space.models.training import _make_sample_weights
 from retrieval_from_space.models.training import train_model
 from retrieval_from_space.models.cnn import KerasCNN3DEstimator
 from retrieval_from_space.paths import RunPaths
@@ -69,6 +71,12 @@ def test_load_pseudonitzschia_cnn_classification_config():
     assert config.model.base_models["optics"].feature_groups == ["optics"]
     assert config.model.base_models["environment"].family == "cnn3d"
     assert config.model.base_models["environment"].feature_groups == ["nut", "car", "phy"]
+    assert config.model.base_models["optics"].sample_weight["mode"] == "balanced"
+    assert config.model.base_models["optics"].augmentation["enabled"] is True
+    assert config.model.base_models["optics"].augmentation["repetitions"] == 10
+    assert config.model.base_models["environment"].sample_weight["mode"] == "balanced"
+    assert config.model.base_models["environment"].augmentation["enabled"] is True
+    assert config.model.base_models["environment"].augmentation["repetitions"] == 10
     assert config.model.base_model is None
     assert config.model.final_model.family == "random_forest"
     assert config.model.final_model.feature_groups == ["meta"]
@@ -383,6 +391,43 @@ def test_cnn3d_loader_preserves_cube_shape(tmp_path):
 
     assert cnn_x.shape == (2, 2, 2, 2, 3)
     assert tree_x.shape == (2, 24)
+
+
+def test_balanced_weights_and_augmentation_preserve_targets():
+    stage = ModelStageConfig(
+        family="cnn3d",
+        feature_groups=["optics"],
+        sample_weight={"mode": "balanced", "class_boost": [1.0, 1.0, 2.0]},
+        augmentation={
+            "enabled": True,
+            "repetitions": 2,
+            "seed": 42,
+            "noise_std": {"optics": [0.1, 0.0]},
+        },
+    )
+    labels = np.array([0, 0, 1, 2])
+    y = np.eye(3)[labels]
+    x = np.zeros((4, 2, 2, 2, 2), dtype=np.float32)
+
+    weights, weight_info = _make_sample_weights("classification", stage, labels)
+    x_fit, y_fit, labels_fit, weights_fit, augmentation_info = _augment_training_data(
+        x,
+        y,
+        labels,
+        weights,
+        stage,
+        random_state=42,
+    )
+
+    assert weight_info["class_distribution"] == {"0": 2, "1": 1, "2": 1}
+    assert weights[labels == 2][0] > weights[labels == 1][0]
+    assert x_fit.shape[0] == 12
+    assert y_fit.shape == (12, 3)
+    assert labels_fit[:4].tolist() == labels.tolist()
+    assert labels_fit[4:].tolist() == np.repeat(labels, 2).tolist()
+    assert weights_fit.shape == (12,)
+    assert augmentation_info["augmented_samples"] == 8
+    assert np.allclose(y_fit.sum(axis=1), 1.0)
 
 
 def test_multi_base_stacking_saves_stage_metrics(tmp_path):

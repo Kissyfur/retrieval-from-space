@@ -66,6 +66,18 @@ model:
         final_activation: softmax
         seed: 42
         metrics: [accuracy]
+        batch_size: 64
+        patience: 3
+        validation_split: 0.15
+      sample_weight:
+        mode: balanced
+        class_boost: [1.0, 1.0, 1.0]
+      augmentation:
+        enabled: true
+        repetitions: 10
+        seed: 42
+        noise_std:
+          optics: [0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.0, 0.0]
       hyperparameter_search:
         enabled: true
         cv: 3
@@ -105,6 +117,20 @@ model:
         final_activation: softmax
         seed: 42
         metrics: [accuracy]
+        batch_size: 64
+        patience: 3
+        validation_split: 0.15
+      sample_weight:
+        mode: balanced
+        class_boost: [1.0, 1.0, 1.0]
+      augmentation:
+        enabled: true
+        repetitions: 10
+        seed: 42
+        noise_std:
+          nut: [0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.0]
+          car: [0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.0]
+          phy: [0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.0]
       hyperparameter_search:
         enabled: true
         cv: 3
@@ -371,7 +397,7 @@ products:
 
 cnn_training:
   data_root: ../../data/datasets/PSEUDO-NITZSCHIA/3d
-  active_branches: [main_optics]
+  active_branches: [main_optics, main_others]
   seed: 42
   repetitions: 10
   patience: 3

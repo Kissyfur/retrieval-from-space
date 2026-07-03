@@ -120,6 +120,8 @@ def _default_base_stage(config: ModelConfig) -> ModelStageConfig:
         feature_groups=config.feature_groups,
         params=config.params,
         standardize=config.standardize,
+        sample_weight=config.sample_weight,
+        augmentation=dict(config.augmentation),
         hyperparameter_search=config.hyperparameter_search,
     )
 
@@ -284,6 +286,135 @@ def _target_for_stage(
     return y_target
 
 
+def _class_distribution(labels: np.ndarray) -> dict[str, int]:
+    labels = np.asarray(labels).reshape(-1)
+    classes, counts = np.unique(labels, return_counts=True)
+    return {str(cls.item() if hasattr(cls, "item") else cls): int(count) for cls, count in zip(classes, counts)}
+
+
+def _sample_weight_settings(stage: ModelStageConfig) -> dict[str, Any]:
+    raw = stage.sample_weight
+    if raw is None or raw is False:
+        return {"enabled": False, "mode": "none", "class_boost": None}
+    if raw is True:
+        return {"enabled": True, "mode": "balanced", "class_boost": None}
+    if isinstance(raw, str):
+        return {"enabled": raw.lower() != "none", "mode": raw.lower(), "class_boost": None}
+    if isinstance(raw, dict):
+        mode = str(raw.get("mode", "balanced")).lower()
+        return {
+            "enabled": bool(raw.get("enabled", mode != "none")),
+            "mode": mode,
+            "class_boost": raw.get("class_boost", raw.get("class_boosts")),
+        }
+    raise ValueError("stage.sample_weight must be false, 'balanced', or a mapping.")
+
+
+def _class_boost_for_label(class_boost, label) -> float:
+    if class_boost is None:
+        return 1.0
+    if isinstance(class_boost, dict):
+        return float(class_boost.get(str(label), class_boost.get(label, 1.0)))
+    boosts = list(class_boost)
+    index = int(label)
+    return float(boosts[index]) if 0 <= index < len(boosts) else 1.0
+
+
+def _make_sample_weights(
+    problem_type: str,
+    stage: ModelStageConfig,
+    labels: np.ndarray | None,
+) -> tuple[np.ndarray | None, dict[str, Any]]:
+    settings = _sample_weight_settings(stage)
+    if problem_type != "classification" or not settings["enabled"]:
+        return None, settings
+    if labels is None:
+        raise ValueError("Classification sample weights require hard labels.")
+    if settings["mode"] != "balanced":
+        raise ValueError("Only sample_weight mode 'balanced' is currently supported.")
+
+    labels = np.asarray(labels).reshape(-1)
+    classes, counts = np.unique(labels, return_counts=True)
+    base = {cls: len(labels) / (len(classes) * count) for cls, count in zip(classes, counts)}
+    weights = np.array(
+        [base[label] * _class_boost_for_label(settings["class_boost"], label) for label in labels],
+        dtype=np.float32,
+    )
+    return weights, {
+        **settings,
+        "class_distribution": _class_distribution(labels),
+        "min": float(np.min(weights)),
+        "max": float(np.max(weights)),
+        "mean": float(np.mean(weights)),
+    }
+
+
+def _noise_std_array(stage: ModelStageConfig, x: np.ndarray) -> np.ndarray | float:
+    config = stage.augmentation
+    std = config.get("noise_std", config.get("std", config.get("std_x", 0.0)))
+    if isinstance(std, dict):
+        values: list[Any] = []
+        for group in stage.feature_groups:
+            group_std = std.get(group, 0.0)
+            if isinstance(group_std, list):
+                values.extend(group_std)
+            else:
+                values.append(group_std)
+        std = values
+    if isinstance(std, list):
+        std_arr = np.asarray(std, dtype=np.float32)
+        channels = x.shape[-1]
+        if len(std_arr) == 1:
+            return float(std_arr[0])
+        if len(std_arr) != channels:
+            raise ValueError(
+                "Augmentation noise_std length must match the feature channel count. "
+                f"Got {len(std_arr)} values for {channels} channels in groups {stage.feature_groups}."
+            )
+        shape = (1,) * (x.ndim - 1) + (channels,)
+        return std_arr.reshape(shape)
+    return float(std)
+
+
+def _augment_training_data(
+    x: np.ndarray,
+    y: np.ndarray,
+    labels: np.ndarray | None,
+    sample_weight: np.ndarray | None,
+    stage: ModelStageConfig,
+    random_state: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None, dict[str, Any]]:
+    config = stage.augmentation
+    if not config or not bool(config.get("enabled", config.get("augment", False))):
+        return x, y, labels, sample_weight, {"enabled": False, "input_samples": int(len(x)), "fit_samples": int(len(x))}
+
+    repetitions = int(config.get("repetitions", 1))
+    if repetitions <= 0:
+        return x, y, labels, sample_weight, {"enabled": False, "input_samples": int(len(x)), "fit_samples": int(len(x))}
+
+    rng = np.random.default_rng(int(config.get("seed", random_state)))
+    x_aug = np.repeat(x, repetitions, axis=0).astype(np.float32, copy=True)
+    noise_std = _noise_std_array(stage, x_aug)
+    if np.any(np.asarray(noise_std) != 0):
+        x_aug = x_aug + rng.normal(0.0, noise_std, size=x_aug.shape)
+    y_aug = np.repeat(y, repetitions, axis=0)
+    labels_aug = None if labels is None else np.repeat(labels, repetitions, axis=0)
+    weight_aug = None if sample_weight is None else np.repeat(sample_weight, repetitions, axis=0)
+
+    x_fit = np.concatenate([x, x_aug], axis=0)
+    y_fit = np.concatenate([y, y_aug], axis=0)
+    labels_fit = None if labels is None else np.concatenate([labels, labels_aug], axis=0)
+    weights_fit = None if sample_weight is None else np.concatenate([sample_weight, weight_aug], axis=0)
+    return x_fit, y_fit, labels_fit, weights_fit, {
+        "enabled": True,
+        "input_samples": int(len(x)),
+        "augmented_samples": int(len(x_aug)),
+        "fit_samples": int(len(x_fit)),
+        "repetitions": repetitions,
+        "noise_std": config.get("noise_std", config.get("std", config.get("std_x", 0.0))),
+    }
+
+
 def _fit_scaler_if_needed(
     x: np.ndarray,
     stage: ModelStageConfig,
@@ -307,11 +438,40 @@ def _fit_estimator(
     x: np.ndarray,
     y: np.ndarray,
     params: dict[str, Any],
+    y_labels: np.ndarray | None = None,
+    random_state: int = 42,
 ):
     _validate_target_compatibility(problem_type, stage, y)
     x_proc, scaler = _fit_scaler_if_needed(x, stage)
+    sample_weight, sample_weight_info = _make_sample_weights(problem_type, stage, y_labels)
+    x_fit, y_fit, labels_fit, sample_weight_fit, augmentation_info = _augment_training_data(
+        x_proc,
+        y,
+        y_labels,
+        sample_weight,
+        stage,
+        random_state,
+    )
     model = create_model(problem_type, stage, params=params)
-    model.fit(x_proc, y)
+    if sample_weight_fit is None:
+        model.fit(x_fit, y_fit)
+    else:
+        try:
+            model.fit(x_fit, y_fit, sample_weight=sample_weight_fit)
+        except TypeError:
+            model.fit(x_fit, y_fit)
+            sample_weight_info = {
+                **sample_weight_info,
+                "warning": f"{type(model).__name__}.fit did not accept sample_weight.",
+            }
+    model._retrieval_training_info = {
+        "input_shape": list(x.shape),
+        "fit_shape": list(x_fit.shape),
+        "target_shape": list(np.asarray(y_fit).shape),
+        "class_distribution": None if labels_fit is None else _class_distribution(labels_fit),
+        "sample_weight": sample_weight_info,
+        "augmentation": augmentation_info,
+    }
     return model, scaler
 
 
@@ -346,7 +506,16 @@ def _select_params(
     for index, params in enumerate(candidates):
         scores = []
         for train_idx, val_idx in splitter.split(x, split_y):
-            model, scaler = _fit_estimator(problem_type, stage, x[train_idx], y[train_idx], params)
+            train_labels = split_y[train_idx] if problem_type == "classification" else None
+            model, scaler = _fit_estimator(
+                problem_type,
+                stage,
+                x[train_idx],
+                y[train_idx],
+                params,
+                y_labels=train_labels,
+                random_state=random_state + index,
+            )
             x_val = _transform_with_scaler(x[val_idx], scaler)
             scores.append(float(scorer(model, x_val, score_y[val_idx])))
         cv_results.append(
@@ -376,7 +545,16 @@ def _out_of_fold_signal(
     split_y = y if split_labels is None else split_labels
     signal = None
     for train_idx, val_idx in splitter.split(x, split_y):
-        model, scaler = _fit_estimator(problem_type, stage, x[train_idx], y[train_idx], params)
+        train_labels = split_y[train_idx] if problem_type == "classification" else None
+        model, scaler = _fit_estimator(
+            problem_type,
+            stage,
+            x[train_idx],
+            y[train_idx],
+            params,
+            y_labels=train_labels,
+            random_state=random_state,
+        )
         x_val = _transform_with_scaler(x[val_idx], scaler)
         fold_signal = _predict_signal(problem_type, model, x_val)
         if signal is None:
@@ -415,6 +593,40 @@ def _save_model_artifact(model, path: Path) -> Path:
     return save_pickle_model(model, path)
 
 
+def _history_payload(model) -> dict[str, Any] | None:
+    history = getattr(model, "history", None)
+    if history is None:
+        return None
+    values = getattr(history, "history", None)
+    if not values:
+        return None
+    payload = {key: [float(v) for v in series] for key, series in values.items()}
+    payload["epochs_ran"] = len(next(iter(payload.values()))) if payload else 0
+    return payload
+
+
+def _history_summary(model) -> dict[str, Any] | None:
+    payload = _history_payload(model)
+    if not payload:
+        return None
+    summary = {"epochs_ran": payload.get("epochs_ran", 0)}
+    for key, values in payload.items():
+        if key == "epochs_ran" or not values:
+            continue
+        summary[f"final_{key}"] = values[-1]
+        lower_is_better = any(token in key.lower() for token in ["loss", "error", "mse", "mae"])
+        summary[f"best_{key}"] = min(values) if lower_is_better else max(values)
+    return summary
+
+
+def _training_info(model) -> dict[str, Any]:
+    info = dict(getattr(model, "_retrieval_training_info", {}))
+    history = _history_summary(model)
+    if history:
+        info["history"] = history
+    return info
+
+
 def _save_stage_artifacts(
     stage_dir: Path,
     model,
@@ -432,6 +644,9 @@ def _save_stage_artifacts(
         stage_dir / "selection.json",
         {"selected_params": selected_params, "cv_results": cv_results},
     )
+    history = _history_payload(model)
+    if history:
+        artifacts["history"] = _write_json(stage_dir / "history.json", history)
     return artifacts
 
 
@@ -509,7 +724,15 @@ def _train_direct(
         split_labels=y_train_labels if problem_type == "classification" else None,
         score_labels=y_train_labels if problem_type == "classification" else None,
     )
-    model, scaler = _fit_estimator(problem_type, stage, x_train, y_train, selected_params)
+    model, scaler = _fit_estimator(
+        problem_type,
+        stage,
+        x_train,
+        y_train,
+        selected_params,
+        y_labels=y_train_labels if problem_type == "classification" else None,
+        random_state=config.problem.random_state,
+    )
     x_test_proc = _transform_with_scaler(x_test, scaler)
     raw_prediction = model.predict(x_test_proc)
     extra_prediction_columns = {}
@@ -523,6 +746,14 @@ def _train_direct(
     else:
         y_pred = raw_prediction
     metrics = _evaluate(problem_type, y_test_labels, y_pred, label_values)
+    split_distribution = (
+        {
+            "train": _class_distribution(y_train_labels),
+            "test": _class_distribution(y_test_labels),
+        }
+        if problem_type == "classification"
+        else None
+    )
     artifacts = _save_stage_artifacts(paths["models"] / "direct", model, scaler, selected_params, cv_results)
     artifacts["model"] = _save_model_artifact(model, paths["models"] / "model.pkl")
     direct_report = {
@@ -532,6 +763,7 @@ def _train_direct(
         "feature_groups": group_names,
         "selected_params": selected_params,
         "cv_results": cv_results,
+        "training": _training_info(model),
         "test_metrics": metrics,
     }
     artifacts["direct_metrics"] = _save_named_stage_metrics(paths, "direct", direct_report)
@@ -542,6 +774,7 @@ def _train_direct(
                 "strategy": "direct",
                 "problem_type": problem_type,
                 "class_encoding": config.problem.class_encoding,
+                "class_distribution": split_distribution,
                 "stages": [direct_report],
                 "final_metrics": metrics,
             },
@@ -561,6 +794,7 @@ def _train_direct(
                 "test_ids": list(map(str, split_ids["test"])),
                 "feature_groups": group_names,
                 "selected_params": selected_params,
+                "class_distribution": split_distribution,
                 "class_encoding": config.problem.class_encoding,
             },
             extra_prediction_columns=extra_prediction_columns,
@@ -635,7 +869,13 @@ def _train_stacked_or_residual(
             split_labels=y_train_labels if problem_type == "classification" else None,
         )
         base_model, base_scaler = _fit_estimator(
-            problem_type, base_stage, x_base_train, base_y_train, base_params
+            problem_type,
+            base_stage,
+            x_base_train,
+            base_y_train,
+            base_params,
+            y_labels=y_train_labels if problem_type == "classification" else None,
+            random_state=config.problem.random_state,
         )
         base_test_signal = _predict_signal(
             problem_type, base_model, _transform_with_scaler(x_base_test, base_scaler)
@@ -653,6 +893,7 @@ def _train_stacked_or_residual(
             "selected_params": base_params,
             "cv_results": base_cv_results,
             "oof_cv": oof_cv,
+            "training": _training_info(base_model),
             "train_oof_metrics": base_train_metrics,
             "test_metrics": base_test_metrics,
         }
@@ -698,7 +939,15 @@ def _train_stacked_or_residual(
         split_labels=y_train_labels if final_problem_type == "classification" else None,
         score_labels=y_train_labels if final_problem_type == "classification" else None,
     )
-    final_model, final_scaler = _fit_estimator(final_problem_type, final_stage, x_final_train, final_y_train, final_params)
+    final_model, final_scaler = _fit_estimator(
+        final_problem_type,
+        final_stage,
+        x_final_train,
+        final_y_train,
+        final_params,
+        y_labels=y_train_labels if final_problem_type == "classification" else None,
+        random_state=config.problem.random_state,
+    )
     x_final_test_proc = _transform_with_scaler(x_final_test, final_scaler)
     final_raw_pred = final_model.predict(x_final_test_proc)
     final_signal = None
@@ -720,6 +969,14 @@ def _train_stacked_or_residual(
 
     metrics = _evaluate(problem_type, test_metric_target, y_pred, label_values)
     final_train_metrics = _evaluate(problem_type, train_metric_target, final_train_pred, label_values)
+    split_distribution = (
+        {
+            "train": _class_distribution(y_train_labels),
+            "test": _class_distribution(y_test_labels),
+        }
+        if problem_type == "classification"
+        else None
+    )
     artifacts.update(
         {f"final_{k}": v for k, v in _save_stage_artifacts(
             paths["models"] / "final", final_model, final_scaler, final_params, final_cv_results
@@ -749,6 +1006,7 @@ def _train_stacked_or_residual(
         "base_prediction_columns": base_prediction_columns,
         "selected_params": final_params,
         "cv_results": final_cv_results,
+        "training": _training_info(final_model),
         "train_metrics": final_train_metrics,
         "test_metrics": metrics,
     }
@@ -756,6 +1014,7 @@ def _train_stacked_or_residual(
         "strategy": strategy,
         "problem_type": problem_type,
         "class_encoding": config.problem.class_encoding,
+        "class_distribution": split_distribution,
         "base_models": {
             name: {
                 "family": stage.family,
@@ -791,6 +1050,7 @@ def _train_stacked_or_residual(
                 "base_selected_params": base_param_payload,
                 "final_selected_params": final_params,
                 "base_prediction_columns": base_prediction_columns,
+                "class_distribution": split_distribution,
                 "class_encoding": config.problem.class_encoding,
             },
             extra_prediction_columns=extra_prediction_columns,

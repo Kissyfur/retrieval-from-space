@@ -100,7 +100,7 @@ class KerasCNN3DEstimator:
         fit_params.setdefault("verbose", 0)
         return build_params, fit_params
 
-    def fit(self, x, y):
+    def fit(self, x, y, sample_weight=None):
         import keras
 
         build_params, fit_params = self._split_params()
@@ -111,7 +111,14 @@ class KerasCNN3DEstimator:
         validation_split = float(fit_params.get("validation_split", 0.0))
         if patience > 0 and validation_split > 0:
             callbacks.append(keras.callbacks.EarlyStopping(patience=patience, restore_best_weights=True))
-        self.history = self.model.fit(x, y, shuffle=True, callbacks=callbacks, **fit_params)
+        self.history = self.model.fit(
+            x,
+            y,
+            shuffle=True,
+            callbacks=callbacks,
+            sample_weight=sample_weight,
+            **fit_params,
+        )
         return self
 
     def _set_classes_from_target(self, y) -> None:
