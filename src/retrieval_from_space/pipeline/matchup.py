@@ -25,12 +25,13 @@ def create_matchups(config: PipelineConfig, paths: RunPaths, state: PipelineStat
             artifacts[product.name] = matchup_path
             continue
         raw_path = paths.raw / f"{product.name}.nc"
+        local_raw_path = raw_path if product.source == "local" and raw_path.exists() else None
         logger.info("Creating matchups for %s", product.name)
         matchups, unmatched = create_product_matchups(
             product,
             targets,
             config.matchup,
-            raw_path=raw_path if raw_path.exists() else None,
+            raw_path=local_raw_path,
         )
         save_matchups(matchups, unmatched, matchup_path, unmatched_path)
         if matchups is not None:

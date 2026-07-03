@@ -12,10 +12,14 @@ from retrieval_from_space.pipeline.download import download_products
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Download/open configured Copernicus products.")
+    parser = argparse.ArgumentParser(description="Prepare configured products for matchup creation.")
     parser.add_argument("--config", required=True, help="Path to JSON/YAML pipeline config.")
     parser.add_argument("--run-id", help="Existing or explicit run id.")
-    parser.add_argument("--overwrite", action="store_true", help="Overwrite existing raw products.")
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing local raw products or remote product markers.",
+    )
     args = parser.parse_args()
 
     config, paths, state = initialize_run(args.config, run_id=args.run_id)
