@@ -104,7 +104,7 @@ The hard class labels are still used for stratified splits and classification
 metrics. See `configs/pseudonitzschia_cnn_classification.yaml` for the CNN
 classification setup copied from the previous notebook. When using a target
 offset, class intervals must be defined in the same transformed space, for
-example `log(count + 100)`.
+example boundaries such as `log(100)`, `log(1000)`, and `log(100000)`.
 
 ## Configuration
 

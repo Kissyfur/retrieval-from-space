@@ -45,6 +45,10 @@ def test_load_pseudonitzschia_cnn_classification_config():
     assert config.problem.class_encoding == "soft_probabilities"
     assert config.problem.soft_label_temperature == 10.0
     assert config.problem.target_transform_offset == 100.0
+    assert np.allclose(
+        np.asarray(config.problem.class_intervals)[:, 0],
+        np.log([100.0, 1000.0, 100000.0]),
+    )
     assert config.target.metadata_columns == ["tem", "sal", "o_perc", "o", "ph"]
     assert config.target.include_spatial_metadata is False
     assert config.target.include_day_metadata is False
