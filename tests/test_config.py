@@ -9,6 +9,7 @@ import xarray as xr
 from retrieval_from_space.config import ModelStageConfig, PipelineConfig, ProductSpec, TargetConfig, load_config
 from retrieval_from_space.models.training import interval_soft_labeling
 from retrieval_from_space.models.training import _load_matrix_for_groups
+from retrieval_from_space.models.cnn import KerasCNN3DEstimator
 from retrieval_from_space.paths import RunPaths
 from retrieval_from_space.pipeline.download import download_products
 from retrieval_from_space.pipeline.matchup import create_matchups
@@ -317,3 +318,16 @@ def test_cnn3d_loader_preserves_cube_shape(tmp_path):
 
     assert cnn_x.shape == (2, 2, 2, 2, 3)
     assert tree_x.shape == (2, 24)
+
+
+def test_keras_cnn_estimator_exposes_classes_for_sklearn_scorers():
+    class FakeModel:
+        def predict(self, x, verbose=0):
+            return np.array([[0.1, 0.8, 0.1], [0.7, 0.2, 0.1]])
+
+    estimator = KerasCNN3DEstimator("classification")
+    estimator._set_classes_from_target(np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0]]))
+    estimator.model = FakeModel()
+
+    assert estimator.classes_.tolist() == [0, 1, 2]
+    assert estimator.predict(np.zeros((2, 2, 2, 2, 1))).tolist() == [1, 0]

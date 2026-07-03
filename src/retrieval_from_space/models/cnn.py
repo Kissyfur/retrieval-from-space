@@ -73,6 +73,8 @@ class KerasCNN3DEstimator:
         self.model = None
         self.history = None
         self._estimator_type = "classifier" if problem_type == "classification" else "regressor"
+        if self.problem_type == "classification":
+            self.classes_ = None
 
     def _split_params(self) -> tuple[dict, dict]:
         build_keys = {
@@ -102,6 +104,7 @@ class KerasCNN3DEstimator:
         import keras
 
         build_params, fit_params = self._split_params()
+        self._set_classes_from_target(y)
         self.model = build_cnn3d(**build_params)
         callbacks = []
         patience = int(fit_params.pop("patience"))
@@ -110,6 +113,15 @@ class KerasCNN3DEstimator:
             callbacks.append(keras.callbacks.EarlyStopping(patience=patience, restore_best_weights=True))
         self.history = self.model.fit(x, y, shuffle=True, callbacks=callbacks, **fit_params)
         return self
+
+    def _set_classes_from_target(self, y) -> None:
+        if self.problem_type != "classification":
+            return
+        y = np.asarray(y)
+        if y.ndim > 1 and y.shape[1] > 1:
+            self.classes_ = np.arange(y.shape[1])
+        else:
+            self.classes_ = np.unique(y.reshape(-1))
 
     def predict_proba(self, x):
         if self.model is None:
@@ -122,7 +134,11 @@ class KerasCNN3DEstimator:
     def predict(self, x):
         prediction = self.predict_proba(x)
         if self.problem_type == "classification":
-            return np.argmax(prediction, axis=1)
+            labels = np.argmax(prediction, axis=1)
+            classes = getattr(self, "classes_", None)
+            if classes is not None:
+                return np.asarray(classes)[labels]
+            return labels
         return prediction.reshape(-1)
 
     def save(self, path: str | Path) -> Path:
