@@ -77,6 +77,8 @@ def test_load_pseudonitzschia_cnn_classification_config():
     assert config.model.base_models["environment"].sample_weight["mode"] == "balanced"
     assert config.model.base_models["environment"].augmentation["enabled"] is True
     assert config.model.base_models["environment"].augmentation["repetitions"] == 10
+    environment_noise = config.model.base_models["environment"].augmentation["noise_std"]
+    assert sum(len(environment_noise[group]) for group in ["nut", "car", "phy"]) == 22
     assert config.model.base_model is None
     assert config.model.final_model.family == "random_forest"
     assert config.model.final_model.feature_groups == ["meta"]
@@ -428,6 +430,42 @@ def test_balanced_weights_and_augmentation_preserve_targets():
     assert weights_fit.shape == (12,)
     assert augmentation_info["augmented_samples"] == 8
     assert np.allclose(y_fit.sum(axis=1), 1.0)
+
+
+def test_augmentation_noise_std_mismatch_is_reported_not_fatal():
+    stage = ModelStageConfig(
+        family="cnn3d",
+        feature_groups=["nut", "car", "phy"],
+        augmentation={
+            "enabled": True,
+            "repetitions": 1,
+            "seed": 42,
+            "noise_std": {
+                "nut": [0.1, 0.1],
+                "car": [0.1, 0.1],
+                "phy": [0.1, 0.1],
+            },
+        },
+    )
+    x = np.zeros((2, 2, 2, 2, 4), dtype=np.float32)
+    y = np.array([0, 1])
+
+    x_fit, y_fit, labels_fit, weights_fit, augmentation_info = _augment_training_data(
+        x,
+        y,
+        labels=None,
+        sample_weight=None,
+        stage=stage,
+        random_state=42,
+    )
+
+    assert x_fit.shape[0] == 4
+    assert y_fit.tolist() == [0, 1, 0, 1]
+    assert labels_fit is None
+    assert weights_fit is None
+    assert augmentation_info["noise_std_info"]["requested_channels"] == 6
+    assert augmentation_info["noise_std_info"]["channels"] == 4
+    assert augmentation_info["noise_std_info"]["adjustment"] == "truncated_to_feature_channels"
 
 
 def test_multi_base_stacking_saves_stage_metrics(tmp_path):

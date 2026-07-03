@@ -350,7 +350,7 @@ def _make_sample_weights(
     }
 
 
-def _noise_std_array(stage: ModelStageConfig, x: np.ndarray) -> np.ndarray | float:
+def _noise_std_array(stage: ModelStageConfig, x: np.ndarray) -> tuple[np.ndarray | float, dict[str, Any]]:
     config = stage.augmentation
     std = config.get("noise_std", config.get("std", config.get("std_x", 0.0)))
     if isinstance(std, dict):
@@ -362,19 +362,23 @@ def _noise_std_array(stage: ModelStageConfig, x: np.ndarray) -> np.ndarray | flo
             else:
                 values.append(group_std)
         std = values
+    info = {"requested": std, "adjustment": "none", "channels": int(x.shape[-1])}
     if isinstance(std, list):
         std_arr = np.asarray(std, dtype=np.float32)
         channels = x.shape[-1]
         if len(std_arr) == 1:
-            return float(std_arr[0])
+            return float(std_arr[0]), {**info, "requested_channels": 1}
         if len(std_arr) != channels:
-            raise ValueError(
-                "Augmentation noise_std length must match the feature channel count. "
-                f"Got {len(std_arr)} values for {channels} channels in groups {stage.feature_groups}."
-            )
+            info = {**info, "requested_channels": int(len(std_arr))}
+            if len(std_arr) > channels:
+                std_arr = std_arr[:channels]
+                info["adjustment"] = "truncated_to_feature_channels"
+            else:
+                std_arr = np.pad(std_arr, (0, channels - len(std_arr)), constant_values=0.0)
+                info["adjustment"] = "padded_with_zero_noise"
         shape = (1,) * (x.ndim - 1) + (channels,)
-        return std_arr.reshape(shape)
-    return float(std)
+        return std_arr.reshape(shape), info
+    return float(std), info
 
 
 def _augment_training_data(
@@ -395,7 +399,7 @@ def _augment_training_data(
 
     rng = np.random.default_rng(int(config.get("seed", random_state)))
     x_aug = np.repeat(x, repetitions, axis=0).astype(np.float32, copy=True)
-    noise_std = _noise_std_array(stage, x_aug)
+    noise_std, noise_info = _noise_std_array(stage, x_aug)
     if np.any(np.asarray(noise_std) != 0):
         x_aug = x_aug + rng.normal(0.0, noise_std, size=x_aug.shape)
     y_aug = np.repeat(y, repetitions, axis=0)
@@ -413,6 +417,7 @@ def _augment_training_data(
         "fit_samples": int(len(x_fit)),
         "repetitions": repetitions,
         "noise_std": config.get("noise_std", config.get("std", config.get("std_x", 0.0))),
+        "noise_std_info": noise_info,
     }
 
 
