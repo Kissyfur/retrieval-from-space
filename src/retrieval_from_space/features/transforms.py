@@ -10,9 +10,11 @@ def positive_quantile(
     data: xr.DataArray,
     quantile: float = 0.01,
     dims: tuple[str, ...] = ("Id", "time", "lat", "lon"),
+    fallback: float = 1e-12,
 ) -> xr.DataArray:
     dims = tuple(dim for dim in dims if dim in data.dims)
-    quant = data.where(data > 0).quantile(quantile, dim=dims)
+    quant = data.where(data > 0).quantile(quantile, dim=dims, skipna=True)
+    quant = quant.where(np.isfinite(quant) & (quant > 0), other=fallback)
     return np.maximum(data, quant)
 
 

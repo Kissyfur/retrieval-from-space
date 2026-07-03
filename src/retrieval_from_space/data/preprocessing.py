@@ -21,10 +21,42 @@ def _option(product: ProductSpec, key: str, default: Any) -> Any:
     return product.preprocess.get(key, default)
 
 
+def _as_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
 def _select_time(data: xr.DataArray, limit: int | None) -> xr.DataArray:
     if limit is None or "time" not in data.dims:
         return data
     return data.isel(time=range(min(limit, data.sizes["time"])))
+
+
+def _use_relative_cube_coordinates(data: xr.DataArray) -> xr.DataArray:
+    coords = {
+        dim: np.arange(data.sizes[dim], dtype=np.int32)
+        for dim in ("lat", "lon", "time")
+        if dim in data.dims
+    }
+    return data.assign_coords(coords) if coords else data
+
+
+def _drop_duplicate_mask_variables(data: xr.DataArray) -> xr.DataArray:
+    if VARIABLE not in data.coords:
+        return data
+    seen_masks = set()
+    keep_indices = []
+    for index, name in enumerate(data[VARIABLE].values):
+        name = str(name)
+        if name in {"cloud_mask", "land_mask"}:
+            if name in seen_masks:
+                continue
+            seen_masks.add(name)
+        keep_indices.append(index)
+    return data.isel({VARIABLE: keep_indices})
 
 
 def _as_dataarray(ds: xr.Dataset, product: ProductSpec) -> xr.DataArray:
@@ -35,6 +67,14 @@ def _as_dataarray(ds: xr.Dataset, product: ProductSpec) -> xr.DataArray:
         rename_map = {old: new for old, new in product.rename_variables.items() if old in ds.data_vars}
         ds = ds.rename(rename_map)
     return ds.to_array(dim=VARIABLE)
+
+
+def _safe_log(data: xr.DataArray) -> xr.DataArray:
+    return np.log(data.where(data > 0))
+
+
+def _safe_log1p(data: xr.DataArray) -> xr.DataArray:
+    return np.log1p(data.where(data > -1))
 
 
 def _prepare_product_array(
@@ -54,12 +94,15 @@ def _prepare_product_array(
 
     quantile = _option(product, "positive_quantile", defaults.preprocess.positive_quantile)
     if quantile is not None:
-        data = positive_quantile(data, quantile=float(quantile))
+        quantile_dims = tuple(
+            _option(product, "positive_quantile_dims", ("Id", "time", "lat", "lon"))
+        )
+        data = positive_quantile(data, quantile=float(quantile), dims=quantile_dims)
 
     if bool(_option(product, "log", defaults.preprocess.log_products)):
-        data = np.log(data)
+        data = _safe_log(data)
     if bool(_option(product, "log1p", False)):
-        data = np.log1p(data)
+        data = _safe_log1p(data)
 
     if bool(_option(product, "prefix_variables", defaults.preprocess.prefix_variables)):
         names = [f"{product.name}:{name}" for name in data[VARIABLE].values]
@@ -67,11 +110,12 @@ def _prepare_product_array(
 
     arrays = [data]
     if cloud_mask is not None and land_mask is not None:
-        arrays.extend([cloud_mask, land_mask])
+        mask_kinds = {str(value) for value in _as_list(_option(product, "mask_kinds", ["cloud_mask", "land_mask"]))}
+        if "cloud_mask" in mask_kinds:
+            arrays.append(cloud_mask)
+        if "land_mask" in mask_kinds:
+            arrays.append(land_mask)
     data = xr.concat(arrays, dim=VARIABLE, coords="minimal")
-
-    time_limit = _option(product, "time_limit", defaults.preprocess.time_limit)
-    data = _select_time(data, time_limit)
 
     ordered_dims = tuple(dim for dim in ORDERED_CUBE_DIMS if dim in data.dims)
     data = data.transpose(*ordered_dims)
@@ -80,6 +124,10 @@ def _prepare_product_array(
     if min_valid_ratio is not None and "cloud_mask" in data[VARIABLE].values and "land_mask" in data[VARIABLE].values:
         ratio = valid_water_coverage(data.sel({VARIABLE: "cloud_mask"}), data.sel({VARIABLE: "land_mask"}))
         data = data.isel(Id=(ratio >= float(min_valid_ratio)).values)
+
+    time_limit = _option(product, "time_limit", defaults.preprocess.time_limit)
+    data = _select_time(data, time_limit)
+    data = _use_relative_cube_coordinates(data)
 
     fillna = _option(product, "fillna", defaults.preprocess.fillna)
     if fillna is not None:
@@ -130,7 +178,8 @@ def preprocess_matchups(config: PipelineConfig, run_root: str | Path) -> dict[st
         if len(arrays) == 1:
             group = arrays[0]
         else:
-            group = xr.concat(arrays, dim=VARIABLE, coords="minimal")
+            group = xr.concat(arrays, dim=VARIABLE, coords="minimal", compat="override", join="override")
+        group = _drop_duplicate_mask_variables(group)
         path = datasets_dir / f"{group_name}.nc"
         group.to_netcdf(path)
         artifacts[group_name] = path

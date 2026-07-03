@@ -89,6 +89,14 @@ def match_observations(
     return xr.concat(matches, dim=ID), observations[observations[ID].isin(unmatched)].copy()
 
 
+def product_matchup_config(product: ProductSpec, default: MatchupConfig) -> MatchupConfig:
+    if not product.matchup:
+        return default
+    data = {name: getattr(default, name) for name in MatchupConfig.__dataclass_fields__}
+    data.update(product.matchup)
+    return MatchupConfig.from_dict(data)
+
+
 def create_product_matchups(
     product: ProductSpec,
     observations: pd.DataFrame,
@@ -97,7 +105,7 @@ def create_product_matchups(
 ) -> tuple[xr.Dataset | None, pd.DataFrame]:
     region = open_local_or_remote(product, raw_path)
     region = rename_common_dimensions(region, product)
-    return match_observations(observations, region, config)
+    return match_observations(observations, region, product_matchup_config(product, config))
 
 
 def save_matchups(matchups: xr.Dataset | None, unmatched: pd.DataFrame, matchup_path: Path, unmatched_path: Path) -> None:
