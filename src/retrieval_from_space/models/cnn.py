@@ -73,6 +73,13 @@ def build_cnn3d(
     return model
 
 
+def _format_log_value(value):
+    try:
+        return f"{float(np.asarray(value).reshape(-1)[0]):.4g}"
+    except (TypeError, ValueError, IndexError):
+        return value
+
+
 class KerasCNN3DEstimator:
     def __init__(self, problem_type: str, **params):
         self.problem_type = problem_type
@@ -98,7 +105,16 @@ class KerasCNN3DEstimator:
             "weighted_metrics",
             "name",
         }
-        fit_keys = {"epochs", "batch_size", "patience", "validation_split", "verbose"}
+        fit_keys = {
+            "epochs",
+            "batch_size",
+            "patience",
+            "validation_split",
+            "verbose",
+            "show_progress",
+            "progress_description",
+            "progress_leave",
+        }
         build_params = {key: value for key, value in self.params.items() if key in build_keys}
         fit_params = {key: value for key, value in self.params.items() if key in fit_keys}
         fit_params.setdefault("epochs", 5000)
@@ -110,15 +126,31 @@ class KerasCNN3DEstimator:
 
     def fit(self, x, y, sample_weight=None):
         import keras
+        from tqdm.auto import tqdm
 
         build_params, fit_params = self._split_params()
         self._set_classes_from_target(y)
         self.model = build_cnn3d(**build_params)
         callbacks = []
         patience = int(fit_params.pop("patience"))
+        show_progress = bool(fit_params.pop("show_progress", True))
+        progress_description = str(fit_params.pop("progress_description", self.params.get("name", "cnn3d")))
+        progress_leave = bool(fit_params.pop("progress_leave", False))
+        epochs = int(fit_params.get("epochs", 0))
+        verbose = int(fit_params.get("verbose", 0))
         validation_split = float(fit_params.get("validation_split", 0.0))
         if patience > 0 and validation_split > 0:
             callbacks.append(keras.callbacks.EarlyStopping(patience=patience, restore_best_weights=True))
+        if show_progress and verbose == 0 and epochs > 0:
+            callbacks.append(
+                _make_tqdm_epoch_progress(
+                    keras,
+                    tqdm,
+                    epochs=epochs,
+                    description=progress_description,
+                    leave=progress_leave,
+                )
+            )
         self.history = self.model.fit(
             x,
             y,
@@ -163,3 +195,35 @@ class KerasCNN3DEstimator:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.model.save(path)
         return path
+
+
+def _make_tqdm_epoch_progress(keras, tqdm_factory, epochs: int, description: str, leave: bool):
+    class TqdmEpochProgress(keras.callbacks.Callback):
+        def __init__(self):
+            super().__init__()
+            self._bar = None
+
+        def on_train_begin(self, logs=None):
+            self._bar = tqdm_factory(
+                total=epochs,
+                desc=description,
+                unit="epoch",
+                leave=leave,
+            )
+
+        def on_epoch_end(self, epoch, logs=None):
+            if self._bar is None:
+                return
+            logs = logs or {}
+            keys = ["loss", "val_loss", "accuracy", "val_accuracy"]
+            postfix = {key: _format_log_value(logs[key]) for key in keys if key in logs}
+            if postfix:
+                self._bar.set_postfix(postfix)
+            self._bar.update(1)
+
+        def on_train_end(self, logs=None):
+            if self._bar is not None:
+                self._bar.close()
+                self._bar = None
+
+    return TqdmEpochProgress()

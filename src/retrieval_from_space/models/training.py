@@ -12,6 +12,7 @@ import xarray as xr
 from sklearn.metrics import get_scorer
 from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
 from sklearn.preprocessing import LabelEncoder, StandardScaler
+from tqdm.auto import tqdm
 
 from retrieval_from_space.config import ModelConfig, ModelStageConfig, PipelineConfig
 from retrieval_from_space.metrics.classification import classification_metrics
@@ -440,6 +441,7 @@ def _fit_estimator(
     params: dict[str, Any],
     y_labels: np.ndarray | None = None,
     random_state: int = 42,
+    progress_description: str | None = None,
 ):
     _validate_target_compatibility(problem_type, stage, y)
     x_proc, scaler = _fit_scaler_if_needed(x, stage)
@@ -452,7 +454,10 @@ def _fit_estimator(
         stage,
         random_state,
     )
-    model = create_model(problem_type, stage, params=params)
+    fit_params = dict(params)
+    if progress_description and _stage_uses_cnn3d(stage):
+        fit_params.setdefault("progress_description", progress_description)
+    model = create_model(problem_type, stage, params=fit_params)
     if sample_weight_fit is None:
         model.fit(x_fit, y_fit)
     else:
@@ -492,6 +497,7 @@ def _select_params(
     random_state: int,
     split_labels: np.ndarray | None = None,
     score_labels: np.ndarray | None = None,
+    stage_name: str = "model",
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     search = stage.hyperparameter_search
     candidates = _candidate_pool(stage)
@@ -503,9 +509,17 @@ def _select_params(
     split_y = y if split_labels is None else split_labels
     score_y = y if score_labels is None else score_labels
     cv_results = []
-    for index, params in enumerate(candidates):
+    candidate_bar = tqdm(candidates, desc=f"{stage_name} hyperparameters", unit="candidate")
+    for index, params in enumerate(candidate_bar):
         scores = []
-        for train_idx, val_idx in splitter.split(x, split_y):
+        splits = list(splitter.split(x, split_y))
+        fold_bar = tqdm(
+            splits,
+            desc=f"{stage_name} candidate {index + 1}/{len(candidates)} CV",
+            unit="fold",
+            leave=False,
+        )
+        for fold_index, (train_idx, val_idx) in enumerate(fold_bar, start=1):
             train_labels = split_y[train_idx] if problem_type == "classification" else None
             model, scaler = _fit_estimator(
                 problem_type,
@@ -515,18 +529,27 @@ def _select_params(
                 params,
                 y_labels=train_labels,
                 random_state=random_state + index,
+                progress_description=(
+                    f"{stage_name} candidate {index + 1}/{len(candidates)} "
+                    f"fold {fold_index}/{len(splits)}"
+                ),
             )
             x_val = _transform_with_scaler(x[val_idx], scaler)
-            scores.append(float(scorer(model, x_val, score_y[val_idx])))
+            score = float(scorer(model, x_val, score_y[val_idx]))
+            scores.append(score)
+            fold_bar.set_postfix(score=f"{score:.4g}")
+        mean_score = float(np.mean(scores))
+        std_score = float(np.std(scores))
         cv_results.append(
             {
                 "candidate_index": index,
                 "params": params,
                 "scores": scores,
-                "mean_score": float(np.mean(scores)),
-                "std_score": float(np.std(scores)),
+                "mean_score": mean_score,
+                "std_score": std_score,
             }
         )
+        candidate_bar.set_postfix(best=f"{max(row['mean_score'] for row in cv_results):.4g}")
     best = max(cv_results, key=lambda row: row["mean_score"])
     return dict(best["params"]), cv_results
 
@@ -540,11 +563,16 @@ def _out_of_fold_signal(
     random_state: int,
     cv: int,
     split_labels: np.ndarray | None = None,
+    stage_name: str = "model",
 ) -> np.ndarray:
     splitter = _splitter(problem_type, cv, random_state)
     split_y = y if split_labels is None else split_labels
     signal = None
-    for train_idx, val_idx in splitter.split(x, split_y):
+    splits = list(splitter.split(x, split_y))
+    for fold_index, (train_idx, val_idx) in enumerate(
+        tqdm(splits, desc=f"{stage_name} OOF predictions", unit="fold"),
+        start=1,
+    ):
         train_labels = split_y[train_idx] if problem_type == "classification" else None
         model, scaler = _fit_estimator(
             problem_type,
@@ -554,6 +582,7 @@ def _out_of_fold_signal(
             params,
             y_labels=train_labels,
             random_state=random_state,
+            progress_description=f"{stage_name} OOF fold {fold_index}/{len(splits)}",
         )
         x_val = _transform_with_scaler(x[val_idx], scaler)
         fold_signal = _predict_signal(problem_type, model, x_val)
@@ -723,6 +752,7 @@ def _train_direct(
         config.problem.random_state,
         split_labels=y_train_labels if problem_type == "classification" else None,
         score_labels=y_train_labels if problem_type == "classification" else None,
+        stage_name="direct",
     )
     model, scaler = _fit_estimator(
         problem_type,
@@ -732,6 +762,7 @@ def _train_direct(
         selected_params,
         y_labels=y_train_labels if problem_type == "classification" else None,
         random_state=config.problem.random_state,
+        progress_description="direct final fit",
     )
     x_test_proc = _transform_with_scaler(x_test, scaler)
     raw_prediction = model.predict(x_test_proc)
@@ -838,8 +869,10 @@ def _train_stacked_or_residual(
     train_metric_target = _metric_target(problem_type, y_train, y_train_labels)
     test_metric_target = _metric_target(problem_type, y_test_target, y_test_labels)
 
-    for base_name, base_stage in base_stages.items():
+    base_stage_items = list(base_stages.items())
+    for base_name, base_stage in tqdm(base_stage_items, desc="Base model stages", unit="stage"):
         slug = _stage_slug(base_name)
+        stage_label = f"base:{base_name}"
         x_base_train, base_groups = _load_matrix_for_groups(
             paths["datasets"], split_ids["train"], base_stage.feature_groups, base_stage
         )
@@ -856,6 +889,7 @@ def _train_stacked_or_residual(
             config.problem.random_state,
             split_labels=y_train_labels if problem_type == "classification" else None,
             score_labels=y_train_labels if problem_type == "classification" else None,
+            stage_name=stage_label,
         )
         oof_cv = max(2, base_stage.hyperparameter_search.cv if base_stage.hyperparameter_search.enabled else 5)
         base_oof_signal = _out_of_fold_signal(
@@ -867,6 +901,7 @@ def _train_stacked_or_residual(
             config.problem.random_state,
             oof_cv,
             split_labels=y_train_labels if problem_type == "classification" else None,
+            stage_name=stage_label,
         )
         base_model, base_scaler = _fit_estimator(
             problem_type,
@@ -876,6 +911,7 @@ def _train_stacked_or_residual(
             base_params,
             y_labels=y_train_labels if problem_type == "classification" else None,
             random_state=config.problem.random_state,
+            progress_description=f"{stage_label} final fit",
         )
         base_test_signal = _predict_signal(
             problem_type, base_model, _transform_with_scaler(x_base_test, base_scaler)
@@ -938,6 +974,7 @@ def _train_stacked_or_residual(
         config.problem.random_state,
         split_labels=y_train_labels if final_problem_type == "classification" else None,
         score_labels=y_train_labels if final_problem_type == "classification" else None,
+        stage_name="final",
     )
     final_model, final_scaler = _fit_estimator(
         final_problem_type,
@@ -947,6 +984,7 @@ def _train_stacked_or_residual(
         final_params,
         y_labels=y_train_labels if final_problem_type == "classification" else None,
         random_state=config.problem.random_state,
+        progress_description="final fit",
     )
     x_final_test_proc = _transform_with_scaler(x_final_test, final_scaler)
     final_raw_pred = final_model.predict(x_final_test_proc)
