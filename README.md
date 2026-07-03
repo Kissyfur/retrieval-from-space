@@ -158,16 +158,25 @@ model:
 For late fusion, use `stacking`. The base model is trained on Copernicus feature groups. Out-of-fold base predictions are then combined with metadata features to train the final model, avoiding leakage from fitting and predicting on the same rows.
 
 ```yaml
+target:
+  metadata_columns: [tem, sal, o_perc, o, ph]
+  include_spatial_metadata: false
+  include_day_metadata: false
+  include_cyclic_day_metadata: true
+
 model:
   strategy: stacking
   include_base_prediction: true
   base_model:
-    family: random_forest
-    feature_groups: [optics, phy, nut]
+    family: cnn3d
+    feature_groups: [optics]
   final_model:
     family: random_forest
     feature_groups: [meta]
 ```
+
+The `meta` dataset computes cyclic day-of-year features as `x_day` and `y_day`
+from the target `time` column, then appends the configured metadata columns.
 
 For regression, `residual_correction` trains the final model to predict `target - base_prediction`, then adds that correction back to the base prediction.
 

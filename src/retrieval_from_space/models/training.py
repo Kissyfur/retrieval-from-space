@@ -249,6 +249,17 @@ def _validate_target_compatibility(problem_type: str, stage: ModelStageConfig, y
         )
 
 
+def _target_for_stage(
+    problem_type: str,
+    stage: ModelStageConfig,
+    y_target: np.ndarray,
+    y_labels: np.ndarray,
+) -> np.ndarray:
+    if problem_type == "classification" and np.asarray(y_target).ndim > 1 and not _stage_uses_cnn3d(stage):
+        return y_labels
+    return y_target
+
+
 def _fit_scaler_if_needed(
     x: np.ndarray,
     stage: ModelStageConfig,
@@ -522,12 +533,13 @@ def _train_stacked_or_residual(
     x_final_test_meta, _ = _load_matrix_for_groups(
         paths["datasets"], split_ids["test"], final_stage.feature_groups, final_stage
     )
+    base_y_train = _target_for_stage(problem_type, base_stage, y_train, y_train_labels)
 
     base_params, base_cv_results = _select_params(
         problem_type,
         base_stage,
         x_base_train,
-        y_train,
+        base_y_train,
         config.problem.random_state,
         split_labels=y_train_labels if problem_type == "classification" else None,
         score_labels=y_train_labels if problem_type == "classification" else None,
@@ -537,13 +549,13 @@ def _train_stacked_or_residual(
         problem_type,
         base_stage,
         x_base_train,
-        y_train,
+        base_y_train,
         base_params,
         config.problem.random_state,
         oof_cv,
         split_labels=y_train_labels if problem_type == "classification" else None,
     )
-    base_model, base_scaler = _fit_estimator(problem_type, base_stage, x_base_train, y_train, base_params)
+    base_model, base_scaler = _fit_estimator(problem_type, base_stage, x_base_train, base_y_train, base_params)
     base_test_signal = _predict_signal(
         problem_type, base_model, _transform_with_scaler(x_base_test, base_scaler)
     )
@@ -559,8 +571,8 @@ def _train_stacked_or_residual(
         final_y_train = y_train - base_oof_signal.reshape(-1)
         final_problem_type = "regression"
     else:
-        final_y_train = y_train
         final_problem_type = problem_type
+        final_y_train = _target_for_stage(final_problem_type, final_stage, y_train, y_train_labels)
 
     final_params, final_cv_results = _select_params(
         final_problem_type,

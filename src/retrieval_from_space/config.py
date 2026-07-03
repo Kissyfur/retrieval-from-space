@@ -41,6 +41,9 @@ class TargetConfig:
     time_column: str = "time"
     sheet_name: str | int | None = None
     metadata_columns: list[str] = field(default_factory=list)
+    include_spatial_metadata: bool = True
+    include_day_metadata: bool = True
+    include_cyclic_day_metadata: bool = True
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "TargetConfig":
@@ -53,6 +56,9 @@ class TargetConfig:
             time_column=str(data.get("time_column", "time")),
             sheet_name=data.get("sheet_name"),
             metadata_columns=list(data.get("metadata_columns", [])),
+            include_spatial_metadata=bool(data.get("include_spatial_metadata", True)),
+            include_day_metadata=bool(data.get("include_day_metadata", True)),
+            include_cyclic_day_metadata=bool(data.get("include_cyclic_day_metadata", True)),
         )
 
 

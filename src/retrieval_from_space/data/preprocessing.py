@@ -204,7 +204,13 @@ def preprocess_matchups(config: PipelineConfig, run_root: str | Path) -> dict[st
     target_path = datasets_dir / "target.nc"
     target_da.to_netcdf(target_path)
 
-    meta = metadata_to_dataarray(targets, config.target.metadata_columns)
+    meta = metadata_to_dataarray(
+        targets,
+        config.target.metadata_columns,
+        include_spatial_metadata=config.target.include_spatial_metadata,
+        include_day_metadata=config.target.include_day_metadata,
+        include_cyclic_day_metadata=config.target.include_cyclic_day_metadata,
+    )
     meta_path = datasets_dir / "meta.nc"
     meta.to_netcdf(meta_path)
 

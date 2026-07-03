@@ -64,17 +64,32 @@ def target_to_dataarray(data: pd.DataFrame, target_name: str = TARGET) -> xr.Dat
 def metadata_to_dataarray(
     data: pd.DataFrame,
     metadata_columns: list[str] | None = None,
+    include_spatial_metadata: bool = True,
+    include_day_metadata: bool = True,
+    include_cyclic_day_metadata: bool = True,
 ) -> xr.DataArray:
     metadata_columns = [] if metadata_columns is None else metadata_columns
-    columns = [LAT, LON, TIME] + [col for col in metadata_columns if col in data.columns]
+    missing_metadata = [col for col in metadata_columns if col not in data.columns]
+    if missing_metadata:
+        raise ValueError(f"Target table is missing configured metadata columns: {missing_metadata}")
+    columns = [TIME] + list(metadata_columns)
+    if include_spatial_metadata:
+        columns = [LAT, LON] + columns
     meta = data[[ID] + columns].copy()
     meta[TIME] = pd.to_datetime(meta[TIME])
     meta["day"] = meta[TIME].dt.dayofyear
     meta["x_day"] = meta["day"].map(day_to_circle_x)
     meta["y_day"] = meta["day"].map(day_to_circle_y)
+    base_columns = []
+    if include_spatial_metadata:
+        base_columns.extend([LAT, LON])
+    if include_cyclic_day_metadata:
+        base_columns.extend(["x_day", "y_day"])
+    if include_day_metadata:
+        base_columns.append("day")
     numeric_columns = [
         col
-        for col in [LAT, LON, "x_day", "y_day", "day"] + metadata_columns
+        for col in base_columns + metadata_columns
         if col in meta.columns and col != TIME
     ]
     return meta[[ID] + numeric_columns].set_index(ID).to_xarray().to_dataarray(

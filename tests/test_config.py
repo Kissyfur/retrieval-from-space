@@ -9,12 +9,14 @@ import xarray as xr
 from retrieval_from_space.config import ModelStageConfig, PipelineConfig, ProductSpec, TargetConfig, load_config
 from retrieval_from_space.models.training import interval_soft_labeling
 from retrieval_from_space.models.training import _load_matrix_for_groups
+from retrieval_from_space.models.training import _target_for_stage
 from retrieval_from_space.models.cnn import KerasCNN3DEstimator
 from retrieval_from_space.paths import RunPaths
 from retrieval_from_space.pipeline.download import download_products
 from retrieval_from_space.pipeline.matchup import create_matchups
 from retrieval_from_space.state import PipelineState
 from retrieval_from_space.data.preprocessing import preprocess_matchups, transform_target
+from retrieval_from_space.data.targets import metadata_to_dataarray
 from retrieval_from_space.features.transforms import positive_quantile
 
 
@@ -43,10 +45,17 @@ def test_load_pseudonitzschia_cnn_classification_config():
     assert config.problem.class_encoding == "soft_probabilities"
     assert config.problem.soft_label_temperature == 10.0
     assert config.problem.target_transform_offset == 100.0
+    assert config.target.metadata_columns == ["tem", "sal", "o_perc", "o", "ph"]
+    assert config.target.include_spatial_metadata is False
+    assert config.target.include_day_metadata is False
+    assert config.target.include_cyclic_day_metadata is True
     assert config.matchup.time_window_days == 14
-    assert config.model.family == "cnn3d"
-    assert config.model.feature_groups == ["optics"]
-    assert len(config.model.hyperparameter_search.candidates) == 3
+    assert config.model.strategy == "stacking"
+    assert config.model.base_model.family == "cnn3d"
+    assert config.model.base_model.feature_groups == ["optics"]
+    assert config.model.final_model.family == "random_forest"
+    assert config.model.final_model.feature_groups == ["meta"]
+    assert len(config.model.base_model.hyperparameter_search.candidates) == 3
     assert config.products[0].name == "reflectance"
     assert config.products[0].preprocess["mask_kinds"] == ["cloud_mask", "land_mask"]
     assert config.products[0].preprocess["min_valid_ratio"] == 0.3
@@ -64,6 +73,17 @@ def test_interval_soft_labeling_returns_smooth_probabilities():
     assert probs.shape == (3, 3)
     assert np.allclose(probs.sum(axis=1), 1.0)
     assert probs.argmax(axis=1).tolist() == [0, 1, 2]
+
+
+def test_tree_stage_uses_hard_labels_when_pipeline_targets_are_soft():
+    soft = np.array([[0.2, 0.7, 0.1], [0.8, 0.1, 0.1]])
+    hard = np.array([1, 0])
+
+    tree_target = _target_for_stage("classification", ModelStageConfig(family="random_forest"), soft, hard)
+    cnn_target = _target_for_stage("classification", ModelStageConfig(family="cnn3d"), soft, hard)
+
+    assert tree_target.tolist() == [1, 0]
+    assert np.allclose(cnn_target, soft)
 
 
 def test_positive_quantile_replaces_zero_with_finite_log_floor():
@@ -98,6 +118,33 @@ def test_target_log_transform_accepts_offset_for_zero_values():
     transformed = transform_target(target, "log", offset=100.0)
 
     assert np.allclose(transformed.values.reshape(-1), np.log([100.0, 110.0]))
+
+
+def test_metadata_to_dataarray_can_use_only_columns_and_cyclic_day():
+    data = pd.DataFrame(
+        {
+            "Id": [1],
+            "lat": [40.0],
+            "lon": [1.0],
+            "time": [pd.Timestamp("2020-04-01")],
+            "target": [1.0],
+            "tem": [18.0],
+            "sal": [37.0],
+            "o_perc": [95.0],
+            "o": [8.0],
+            "ph": [8.1],
+        }
+    )
+
+    meta = metadata_to_dataarray(
+        data,
+        ["tem", "sal", "o_perc", "o", "ph"],
+        include_spatial_metadata=False,
+        include_day_metadata=False,
+        include_cyclic_day_metadata=True,
+    )
+
+    assert meta["variable"].values.tolist() == ["x_day", "y_day", "tem", "sal", "o_perc", "o", "ph"]
 
 
 def test_remote_download_writes_marker_without_materializing_dataset(tmp_path):
