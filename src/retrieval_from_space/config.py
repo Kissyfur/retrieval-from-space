@@ -235,11 +235,27 @@ class ModelStageConfig:
         )
 
 
+def _model_stage_mapping_from_dict(data: Any) -> dict[str, ModelStageConfig]:
+    if not data:
+        return {}
+    if isinstance(data, dict):
+        return {str(name): ModelStageConfig.from_dict(stage) for name, stage in data.items()}
+    if isinstance(data, list):
+        stages = {}
+        for index, raw_stage in enumerate(data):
+            stage_data = dict(raw_stage)
+            name = str(stage_data.pop("name", f"base_{index + 1}"))
+            stages[name] = ModelStageConfig.from_dict(stage_data)
+        return stages
+    raise ValueError("model.base_models must be a mapping or a list of named stages.")
+
+
 @dataclass
 class ModelConfig(ModelStageConfig):
     strategy: str = "direct"
     include_base_prediction: bool = True
     base_model: ModelStageConfig | None = None
+    base_models: dict[str, ModelStageConfig] = field(default_factory=dict)
     final_model: ModelStageConfig | None = None
 
     @classmethod
@@ -257,6 +273,7 @@ class ModelConfig(ModelStageConfig):
             strategy=strategy,
             include_base_prediction=bool(data.get("include_base_prediction", True)),
             base_model=ModelStageConfig.from_dict(data["base_model"]) if data.get("base_model") else None,
+            base_models=_model_stage_mapping_from_dict(data.get("base_models")),
             final_model=ModelStageConfig.from_dict(data["final_model"]) if data.get("final_model") else None,
         )
 
