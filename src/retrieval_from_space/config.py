@@ -69,6 +69,7 @@ class ProductSpec:
         default_factory=lambda: {"latitude": "lat", "longitude": "lon"}
     )
     rename_variables: dict[str, str] = field(default_factory=dict)
+    matchup: dict[str, Any] = field(default_factory=dict)
     preprocess: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -86,6 +87,7 @@ class ProductSpec:
                 data.get("rename_dimensions", {"latitude": "lat", "longitude": "lon"})
             ),
             rename_variables=dict(data.get("rename_variables", {})),
+            matchup=dict(data.get("matchup", {})),
             preprocess=dict(data.get("preprocess", {})),
         )
 
@@ -144,6 +146,9 @@ class ProblemConfig:
     target_transform: str = "none"
     class_intervals: list[list[float]] = field(default_factory=list)
     class_labels: list[str] = field(default_factory=list)
+    class_encoding: str = "hard"
+    soft_label_temperature: float = 1.0
+    soft_label_prior: float = 1.0
     test_size: float = 0.2
     random_state: int = 42
 
@@ -155,11 +160,28 @@ class ProblemConfig:
             problem_type = str(problem_type).lower()
             if problem_type not in {"classification", "regression"}:
                 raise ValueError("problem.type must be 'classification' or 'regression'.")
+        class_encoding = str(data.get("class_encoding", "hard")).lower().replace("-", "_")
+        aliases = {
+            "classes": "hard",
+            "hard_classes": "hard",
+            "onehot": "one_hot",
+            "soft": "soft_probabilities",
+            "smooth": "soft_probabilities",
+            "smooth_probabilities": "soft_probabilities",
+        }
+        class_encoding = aliases.get(class_encoding, class_encoding)
+        if class_encoding not in {"hard", "one_hot", "soft_probabilities"}:
+            raise ValueError(
+                "problem.class_encoding must be 'hard', 'one_hot', or 'soft_probabilities'."
+            )
         return cls(
             type=problem_type,
             target_transform=str(data.get("target_transform", "none")).lower(),
             class_intervals=[list(map(float, v)) for v in data.get("class_intervals", [])],
             class_labels=[str(v) for v in data.get("class_labels", [])],
+            class_encoding=class_encoding,
+            soft_label_temperature=float(data.get("soft_label_temperature", 1.0)),
+            soft_label_prior=float(data.get("soft_label_prior", 1.0)),
             test_size=float(data.get("test_size", 0.2)),
             random_state=int(data.get("random_state", 42)),
         )

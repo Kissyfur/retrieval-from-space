@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from retrieval_from_space.config import ModelStageConfig
+from retrieval_from_space.models.cnn import KerasCNN3DEstimator
 from retrieval_from_space.models.tree import random_forest, xgboost_model
 
 
@@ -12,5 +13,5 @@ def create_model(problem_type: str, config: ModelStageConfig, params: dict | Non
     if family in {"xgboost", "xgb"}:
         return xgboost_model(problem_type, **model_params)
     if family in {"cnn3d", "3d_cnn"}:
-        raise ValueError("cnn3d is available as a builder, but automated CLI training currently supports tree models.")
+        return KerasCNN3DEstimator(problem_type, **model_params)
     raise ValueError(f"Unsupported model family: {config.family}")

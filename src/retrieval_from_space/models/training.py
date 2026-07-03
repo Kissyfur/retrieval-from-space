@@ -33,6 +33,35 @@ def interval_labeling(values: np.ndarray, intervals: list[list[float]]) -> np.nd
     return np.argmax(conditions, axis=1)
 
 
+def interval_soft_labeling(
+    values: np.ndarray,
+    intervals: list[list[float]],
+    temperature: float = 1.0,
+    prior: float = 1.0,
+) -> np.ndarray:
+    values = np.asarray(values, dtype=float).reshape(-1, 1)
+    intervals_arr = np.asarray(intervals, dtype=float)
+    if intervals_arr.ndim != 2 or intervals_arr.shape[1] != 2:
+        raise ValueError("Class intervals must be shaped as [[low, high], ...].")
+    if temperature <= 0:
+        raise ValueError("Soft-label temperature must be greater than zero.")
+    if prior < 0:
+        raise ValueError("Soft-label prior must be greater than or equal to zero.")
+
+    left = intervals_arr[:, 0]
+    right = intervals_arr[:, 1]
+    distances = np.where(values < left, left - values, np.where(values > right, values - right, 0.0))
+    similarities = np.exp(-distances / temperature) + prior
+    return similarities / similarities.sum(axis=1, keepdims=True)
+
+
+def _one_hot(labels: np.ndarray, n_classes: int) -> np.ndarray:
+    labels = np.asarray(labels, dtype=int).reshape(-1)
+    encoded = np.zeros((len(labels), n_classes), dtype=float)
+    encoded[np.arange(len(labels)), labels] = 1.0
+    return encoded
+
+
 def resolve_problem_type(config: PipelineConfig, interactive: bool = False) -> str:
     if config.problem.type:
         return config.problem.type
@@ -55,8 +84,36 @@ def _json_default(value: Any):
     return str(value)
 
 
-def _load_group(path: Path, ids) -> np.ndarray:
+class ArrayStandardizer:
+    def __init__(self):
+        self.mean_ = None
+        self.std_ = None
+
+    def fit(self, x: np.ndarray) -> "ArrayStandardizer":
+        axes = tuple(range(x.ndim - 1))
+        self.mean_ = np.nanmean(x, axis=axes, keepdims=True)
+        self.std_ = np.nanstd(x, axis=axes, keepdims=True)
+        self.std_ = np.where(self.std_ == 0, 1.0, self.std_)
+        return self
+
+    def transform(self, x: np.ndarray) -> np.ndarray:
+        if self.mean_ is None or self.std_ is None:
+            raise ValueError("The array standardizer has not been fitted.")
+        return (x - self.mean_) / self.std_
+
+    def fit_transform(self, x: np.ndarray) -> np.ndarray:
+        return self.fit(x).transform(x)
+
+
+def _stage_uses_cnn3d(stage: ModelStageConfig | ModelConfig) -> bool:
+    return stage.family.lower() in {"cnn3d", "3d_cnn"}
+
+
+def _load_group(path: Path, ids, flatten: bool = True) -> np.ndarray:
     data = xr.load_dataarray(path).sel(Id=ids)
+    if not flatten:
+        data = data.transpose("Id", "lat", "lon", "time", "variable")
+        return np.asarray(data.values)
     return np.asarray(data.values).reshape(len(ids), -1)
 
 
@@ -87,12 +144,20 @@ def _all_feature_group_paths(datasets_dir: Path, config: ModelConfig) -> list[Pa
     return list(unique.values())
 
 
-def _load_matrix_for_groups(datasets_dir: Path, ids, feature_groups: list[str]) -> tuple[np.ndarray, list[str]]:
+def _load_matrix_for_groups(
+    datasets_dir: Path,
+    ids,
+    feature_groups: list[str],
+    stage: ModelStageConfig | ModelConfig | None = None,
+) -> tuple[np.ndarray, list[str]]:
     group_paths = _feature_group_paths(datasets_dir, feature_groups)
     missing = [path for path in group_paths if not path.exists()]
     if missing:
         raise FileNotFoundError(f"Missing feature group files: {missing}")
-    x = np.hstack([_load_group(path, ids) for path in group_paths])
+    if stage is not None and _stage_uses_cnn3d(stage):
+        x = np.concatenate([_load_group(path, ids, flatten=False) for path in group_paths], axis=-1)
+    else:
+        x = np.hstack([_load_group(path, ids) for path in group_paths])
     return np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0), [path.stem for path in group_paths]
 
 
@@ -114,15 +179,32 @@ def _prepare_labels(problem_type: str, y: np.ndarray, config: PipelineConfig):
     label_encoder = None
     label_values = None
     if problem_type == "regression":
-        return y.astype(float), label_values, label_encoder
+        y_reg = y.astype(float)
+        return y_reg, y_reg, label_values, label_encoder
 
     if config.problem.class_intervals:
-        labels = interval_labeling(y.astype(float), config.problem.class_intervals)
-        return labels, list(range(len(config.problem.class_intervals))), label_encoder
+        hard_labels = interval_labeling(y.astype(float), config.problem.class_intervals)
+        label_values = list(range(len(config.problem.class_intervals)))
+        if config.problem.class_encoding == "one_hot":
+            return _one_hot(hard_labels, len(label_values)), hard_labels, label_values, label_encoder
+        if config.problem.class_encoding == "soft_probabilities":
+            soft_labels = interval_soft_labeling(
+                y.astype(float),
+                config.problem.class_intervals,
+                temperature=config.problem.soft_label_temperature,
+                prior=config.problem.soft_label_prior,
+            )
+            return soft_labels, hard_labels, label_values, label_encoder
+        return hard_labels, hard_labels, label_values, label_encoder
 
     label_encoder = LabelEncoder()
-    labels = label_encoder.fit_transform(y)
-    return labels, list(range(len(label_encoder.classes_))), label_encoder
+    hard_labels = label_encoder.fit_transform(y)
+    label_values = list(range(len(label_encoder.classes_)))
+    if config.problem.class_encoding == "one_hot":
+        return _one_hot(hard_labels, len(label_values)), hard_labels, label_values, label_encoder
+    if config.problem.class_encoding == "soft_probabilities":
+        raise ValueError("Soft probability labels require problem.class_intervals.")
+    return hard_labels, hard_labels, label_values, label_encoder
 
 
 def _candidate_pool(stage: ModelStageConfig) -> list[dict[str, Any]]:
@@ -147,14 +229,40 @@ def _splitter(problem_type: str, cv: int, random_state: int):
     return KFold(n_splits=cv, shuffle=True, random_state=random_state)
 
 
-def _fit_scaler_if_needed(x: np.ndarray, stage: ModelStageConfig) -> tuple[np.ndarray, StandardScaler | None]:
+def _classification_labels(prediction: np.ndarray) -> np.ndarray:
+    prediction = np.asarray(prediction)
+    if prediction.ndim > 1 and prediction.shape[1] > 1:
+        return np.argmax(prediction, axis=1)
+    return prediction.reshape(-1)
+
+
+def _validate_target_compatibility(problem_type: str, stage: ModelStageConfig, y: np.ndarray) -> None:
+    if problem_type != "classification":
+        return
+    if np.asarray(y).ndim <= 1:
+        return
+    family = stage.family.lower()
+    if family not in {"cnn", "cnn1d", "1d_cnn", "cnn3d", "3d_cnn"}:
+        raise ValueError(
+            "Probability-vector classification targets require a model family that accepts "
+            "2D class targets, such as cnn3d. Use problem.class_encoding: hard for tree models."
+        )
+
+
+def _fit_scaler_if_needed(
+    x: np.ndarray,
+    stage: ModelStageConfig,
+) -> tuple[np.ndarray, StandardScaler | ArrayStandardizer | None]:
     if not stage.standardize:
         return x, None
+    if _stage_uses_cnn3d(stage):
+        scaler = ArrayStandardizer()
+        return scaler.fit_transform(x), scaler
     scaler = StandardScaler()
     return scaler.fit_transform(x), scaler
 
 
-def _transform_with_scaler(x: np.ndarray, scaler: StandardScaler | None) -> np.ndarray:
+def _transform_with_scaler(x: np.ndarray, scaler: StandardScaler | ArrayStandardizer | None) -> np.ndarray:
     return x if scaler is None else scaler.transform(x)
 
 
@@ -165,6 +273,7 @@ def _fit_estimator(
     y: np.ndarray,
     params: dict[str, Any],
 ):
+    _validate_target_compatibility(problem_type, stage, y)
     x_proc, scaler = _fit_scaler_if_needed(x, stage)
     model = create_model(problem_type, stage, params=params)
     model.fit(x_proc, y)
@@ -174,7 +283,10 @@ def _fit_estimator(
 def _predict_signal(problem_type: str, model, x: np.ndarray) -> np.ndarray:
     if problem_type == "classification" and hasattr(model, "predict_proba"):
         return np.asarray(model.predict_proba(x))
-    return np.asarray(model.predict(x)).reshape(-1, 1)
+    prediction = np.asarray(model.predict(x))
+    if problem_type == "classification" and prediction.ndim > 1:
+        return prediction
+    return prediction.reshape(-1, 1)
 
 
 def _select_params(
@@ -183,6 +295,8 @@ def _select_params(
     x: np.ndarray,
     y: np.ndarray,
     random_state: int,
+    split_labels: np.ndarray | None = None,
+    score_labels: np.ndarray | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     search = stage.hyperparameter_search
     candidates = _candidate_pool(stage)
@@ -191,13 +305,15 @@ def _select_params(
 
     scorer = get_scorer(search.scoring or _default_scoring(problem_type))
     splitter = _splitter(problem_type, search.cv, random_state)
+    split_y = y if split_labels is None else split_labels
+    score_y = y if score_labels is None else score_labels
     cv_results = []
     for index, params in enumerate(candidates):
         scores = []
-        for train_idx, val_idx in splitter.split(x, y):
+        for train_idx, val_idx in splitter.split(x, split_y):
             model, scaler = _fit_estimator(problem_type, stage, x[train_idx], y[train_idx], params)
             x_val = _transform_with_scaler(x[val_idx], scaler)
-            scores.append(float(scorer(model, x_val, y[val_idx])))
+            scores.append(float(scorer(model, x_val, score_y[val_idx])))
         cv_results.append(
             {
                 "candidate_index": index,
@@ -219,10 +335,12 @@ def _out_of_fold_signal(
     params: dict[str, Any],
     random_state: int,
     cv: int,
+    split_labels: np.ndarray | None = None,
 ) -> np.ndarray:
     splitter = _splitter(problem_type, cv, random_state)
+    split_y = y if split_labels is None else split_labels
     signal = None
-    for train_idx, val_idx in splitter.split(x, y):
+    for train_idx, val_idx in splitter.split(x, split_y):
         model, scaler = _fit_estimator(problem_type, stage, x[train_idx], y[train_idx], params)
         x_val = _transform_with_scaler(x[val_idx], scaler)
         fold_signal = _predict_signal(problem_type, model, x_val)
@@ -246,15 +364,21 @@ def _write_json(path: Path, payload: dict[str, Any]) -> Path:
     return path
 
 
+def _save_model_artifact(model, path: Path) -> Path:
+    if hasattr(model, "save"):
+        return model.save(path)
+    return save_pickle_model(model, path)
+
+
 def _save_stage_artifacts(
     stage_dir: Path,
     model,
-    scaler: StandardScaler | None,
+    scaler: StandardScaler | ArrayStandardizer | None,
     selected_params: dict[str, Any],
     cv_results: list[dict[str, Any]],
 ) -> dict[str, Path]:
     stage_dir.mkdir(parents=True, exist_ok=True)
-    artifacts = {"model": save_pickle_model(model, stage_dir / "model.pkl")}
+    artifacts = {"model": _save_model_artifact(model, stage_dir / "model.pkl")}
     if scaler is not None:
         with (stage_dir / "scaler.pkl").open("wb") as f:
             pickle.dump(scaler, f)
@@ -309,23 +433,44 @@ def _train_direct(
     x_train,
     x_test,
     y_train,
-    y_test,
+    y_test_target,
+    y_train_labels,
+    y_test_labels,
     label_values,
     group_names: list[str],
 ) -> dict[str, Path]:
     stage = config.model
-    selected_params, cv_results = _select_params(problem_type, stage, x_train, y_train, config.problem.random_state)
+    selected_params, cv_results = _select_params(
+        problem_type,
+        stage,
+        x_train,
+        y_train,
+        config.problem.random_state,
+        split_labels=y_train_labels if problem_type == "classification" else None,
+        score_labels=y_train_labels if problem_type == "classification" else None,
+    )
     model, scaler = _fit_estimator(problem_type, stage, x_train, y_train, selected_params)
-    y_pred = model.predict(_transform_with_scaler(x_test, scaler))
-    metrics = _evaluate(problem_type, y_test, y_pred, label_values)
+    x_test_proc = _transform_with_scaler(x_test, scaler)
+    raw_prediction = model.predict(x_test_proc)
+    extra_prediction_columns = {}
+    if problem_type == "classification":
+        signal = _predict_signal(problem_type, model, x_test_proc)
+        y_pred = _classification_labels(signal)
+        if signal.ndim > 1 and signal.shape[1] > 1:
+            extra_prediction_columns["class_probability"] = signal
+        if np.asarray(y_test_target).ndim > 1:
+            extra_prediction_columns["target_probability"] = y_test_target
+    else:
+        y_pred = raw_prediction
+    metrics = _evaluate(problem_type, y_test_labels, y_pred, label_values)
     artifacts = _save_stage_artifacts(paths["models"] / "direct", model, scaler, selected_params, cv_results)
-    artifacts["model"] = save_pickle_model(model, paths["models"] / "model.pkl")
+    artifacts["model"] = _save_model_artifact(model, paths["models"] / "model.pkl")
     artifacts.update(
         _save_common_outputs(
             paths,
             problem_type,
             split_ids["test"],
-            y_test,
+            y_test_labels,
             y_pred,
             metrics,
             {
@@ -334,7 +479,9 @@ def _train_direct(
                 "test_ids": list(map(str, split_ids["test"])),
                 "feature_groups": group_names,
                 "selected_params": selected_params,
+                "class_encoding": config.problem.class_encoding,
             },
+            extra_prediction_columns=extra_prediction_columns,
         )
     )
     return artifacts
@@ -346,7 +493,9 @@ def _train_stacked_or_residual(
     paths: dict[str, Path],
     split_ids,
     y_train,
-    y_test,
+    y_test_target,
+    y_train_labels,
+    y_test_labels,
     label_values,
 ) -> dict[str, Path]:
     strategy = config.model.strategy
@@ -361,17 +510,38 @@ def _train_stacked_or_residual(
     )
     final_stage = config.model.final_model or ModelStageConfig(feature_groups=["meta"])
 
-    x_base_train, base_groups = _load_matrix_for_groups(paths["datasets"], split_ids["train"], base_stage.feature_groups)
-    x_base_test, _ = _load_matrix_for_groups(paths["datasets"], split_ids["test"], base_stage.feature_groups)
-    x_final_train_meta, final_groups = _load_matrix_for_groups(paths["datasets"], split_ids["train"], final_stage.feature_groups)
-    x_final_test_meta, _ = _load_matrix_for_groups(paths["datasets"], split_ids["test"], final_stage.feature_groups)
+    x_base_train, base_groups = _load_matrix_for_groups(
+        paths["datasets"], split_ids["train"], base_stage.feature_groups, base_stage
+    )
+    x_base_test, _ = _load_matrix_for_groups(
+        paths["datasets"], split_ids["test"], base_stage.feature_groups, base_stage
+    )
+    x_final_train_meta, final_groups = _load_matrix_for_groups(
+        paths["datasets"], split_ids["train"], final_stage.feature_groups, final_stage
+    )
+    x_final_test_meta, _ = _load_matrix_for_groups(
+        paths["datasets"], split_ids["test"], final_stage.feature_groups, final_stage
+    )
 
     base_params, base_cv_results = _select_params(
-        problem_type, base_stage, x_base_train, y_train, config.problem.random_state
+        problem_type,
+        base_stage,
+        x_base_train,
+        y_train,
+        config.problem.random_state,
+        split_labels=y_train_labels if problem_type == "classification" else None,
+        score_labels=y_train_labels if problem_type == "classification" else None,
     )
     oof_cv = max(2, base_stage.hyperparameter_search.cv if base_stage.hyperparameter_search.enabled else 5)
     base_oof_signal = _out_of_fold_signal(
-        problem_type, base_stage, x_base_train, y_train, base_params, config.problem.random_state, oof_cv
+        problem_type,
+        base_stage,
+        x_base_train,
+        y_train,
+        base_params,
+        config.problem.random_state,
+        oof_cv,
+        split_labels=y_train_labels if problem_type == "classification" else None,
     )
     base_model, base_scaler = _fit_estimator(problem_type, base_stage, x_base_train, y_train, base_params)
     base_test_signal = _predict_signal(
@@ -393,16 +563,26 @@ def _train_stacked_or_residual(
         final_problem_type = problem_type
 
     final_params, final_cv_results = _select_params(
-        final_problem_type, final_stage, x_final_train, final_y_train, config.problem.random_state
+        final_problem_type,
+        final_stage,
+        x_final_train,
+        final_y_train,
+        config.problem.random_state,
+        split_labels=y_train_labels if final_problem_type == "classification" else None,
+        score_labels=y_train_labels if final_problem_type == "classification" else None,
     )
     final_model, final_scaler = _fit_estimator(final_problem_type, final_stage, x_final_train, final_y_train, final_params)
-    final_raw_pred = final_model.predict(_transform_with_scaler(x_final_test, final_scaler))
+    x_final_test_proc = _transform_with_scaler(x_final_test, final_scaler)
+    final_raw_pred = final_model.predict(x_final_test_proc)
     if strategy == "residual_correction":
         y_pred = base_test_signal.reshape(-1) + final_raw_pred
+    elif problem_type == "classification":
+        final_signal = _predict_signal(problem_type, final_model, x_final_test_proc)
+        y_pred = _classification_labels(final_signal)
     else:
         y_pred = final_raw_pred
 
-    metrics = _evaluate(problem_type, y_test, y_pred, label_values)
+    metrics = _evaluate(problem_type, y_test_labels, y_pred, label_values)
     artifacts = {}
     artifacts.update(
         {f"base_{k}": v for k, v in _save_stage_artifacts(
@@ -416,12 +596,18 @@ def _train_stacked_or_residual(
     )
     if strategy == "residual_correction":
         artifacts["model"] = artifacts["final_model"]
+    extra_prediction_columns = {"base_signal": base_test_signal}
+    if problem_type == "classification" and strategy != "residual_correction":
+        if final_signal.ndim > 1 and final_signal.shape[1] > 1:
+            extra_prediction_columns["final_class_probability"] = final_signal
+        if np.asarray(y_test_target).ndim > 1:
+            extra_prediction_columns["target_probability"] = y_test_target
     artifacts.update(
         _save_common_outputs(
             paths,
             problem_type,
             split_ids["test"],
-            y_test,
+            y_test_labels,
             y_pred,
             metrics,
             {
@@ -433,8 +619,9 @@ def _train_stacked_or_residual(
                 "include_base_prediction": config.model.include_base_prediction,
                 "base_selected_params": base_params,
                 "final_selected_params": final_params,
+                "class_encoding": config.problem.class_encoding,
             },
-            extra_prediction_columns={"base_signal": base_test_signal},
+            extra_prediction_columns=extra_prediction_columns,
         )
     )
     return artifacts
@@ -453,11 +640,12 @@ def train_model(config: PipelineConfig, run_root: str | Path, interactive: bool 
         path.mkdir(parents=True, exist_ok=True)
 
     ids, y_raw = _load_training_data(paths["datasets"], config)
-    y, label_values, label_encoder = _prepare_labels(problem_type, y_raw, config)
-    stratify = y if problem_type == "classification" else None
-    train_ids, test_ids, y_train, y_test = train_test_split(
+    y_target, y_labels, label_values, label_encoder = _prepare_labels(problem_type, y_raw, config)
+    stratify = y_labels if problem_type == "classification" else None
+    train_ids, test_ids, y_train, y_test_target, y_train_labels, y_test_labels = train_test_split(
         ids,
-        y,
+        y_target,
+        y_labels,
         test_size=config.problem.test_size,
         random_state=config.problem.random_state,
         stratify=stratify,
@@ -469,8 +657,12 @@ def train_model(config: PipelineConfig, run_root: str | Path, interactive: bool 
             pickle.dump(label_encoder, f)
 
     if config.model.strategy == "direct":
-        x_train, group_names = _load_matrix_for_groups(paths["datasets"], train_ids, config.model.feature_groups)
-        x_test, _ = _load_matrix_for_groups(paths["datasets"], test_ids, config.model.feature_groups)
+        x_train, group_names = _load_matrix_for_groups(
+            paths["datasets"], train_ids, config.model.feature_groups, config.model
+        )
+        x_test, _ = _load_matrix_for_groups(
+            paths["datasets"], test_ids, config.model.feature_groups, config.model
+        )
         return _train_direct(
             config,
             problem_type,
@@ -479,9 +671,21 @@ def train_model(config: PipelineConfig, run_root: str | Path, interactive: bool 
             x_train,
             x_test,
             y_train,
-            y_test,
+            y_test_target,
+            y_train_labels,
+            y_test_labels,
             label_values,
             group_names,
         )
 
-    return _train_stacked_or_residual(config, problem_type, paths, split_ids, y_train, y_test, label_values)
+    return _train_stacked_or_residual(
+        config,
+        problem_type,
+        paths,
+        split_ids,
+        y_train,
+        y_test_target,
+        y_train_labels,
+        y_test_labels,
+        label_values,
+    )

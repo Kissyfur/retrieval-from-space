@@ -17,6 +17,7 @@ problem:
     - [1000, 20000]
     - [20000, 5000000]
   class_labels: [low, medium, high]
+  class_encoding: hard
   test_size: 0.2
   random_state: 42
 
