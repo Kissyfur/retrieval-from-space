@@ -170,6 +170,12 @@ model:
       max_depth: 4
       min_samples_leaf: 4
       class_weight: balanced
+    decision_thresholds:
+      enabled: true
+      tune: true
+      target_class: 2
+      scoring: f1_macro
+      grid: [0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60]
     hyperparameter_search:
       enabled: true
       cv: 5

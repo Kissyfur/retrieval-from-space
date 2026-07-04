@@ -19,10 +19,13 @@ from retrieval_from_space.models.training import interval_soft_labeling
 from retrieval_from_space.models.training import _load_matrix_for_groups
 from retrieval_from_space.models.training import _target_for_stage
 from retrieval_from_space.models.training import _augment_training_data
+from retrieval_from_space.models.training import _apply_target_class_threshold
 from retrieval_from_space.models.training import _make_sample_weights
+from retrieval_from_space.models.training import _tune_decision_threshold
 from retrieval_from_space.models.training import train_final_model
 from retrieval_from_space.models.training import train_model
 from retrieval_from_space.models.cnn import KerasCNN3DEstimator
+from retrieval_from_space.metrics.classification import save_confusion_matrix_plot
 from retrieval_from_space.paths import RunPaths
 from retrieval_from_space.pipeline.download import download_products
 from retrieval_from_space.pipeline.matchup import create_matchups
@@ -83,6 +86,9 @@ def test_load_pseudonitzschia_cnn_classification_config():
     assert config.model.base_model is None
     assert config.model.final_model.family == "random_forest"
     assert config.model.final_model.feature_groups == ["meta"]
+    assert config.model.final_model.decision_thresholds["enabled"] is True
+    assert config.model.final_model.decision_thresholds["target_class"] == 2
+    assert 0.5 in config.model.final_model.decision_thresholds["grid"]
     assert len(config.model.base_models["optics"].hyperparameter_search.candidates) == 3
     assert len(config.model.base_models["environment"].hyperparameter_search.candidates) == 3
     assert config.products[0].name == "reflectance"
@@ -113,6 +119,45 @@ def test_tree_stage_uses_hard_labels_when_pipeline_targets_are_soft():
 
     assert tree_target.tolist() == [1, 0]
     assert np.allclose(cnn_target, soft)
+
+
+def test_decision_threshold_tunes_target_class_from_oof_probabilities():
+    stage = ModelStageConfig(
+        decision_thresholds={
+            "enabled": True,
+            "target_class": 2,
+            "grid": [0.3, 0.5],
+            "scoring": "f1_macro",
+        }
+    )
+    signal = np.array(
+        [
+            [0.1, 0.2, 0.7],
+            [0.1, 0.55, 0.35],
+            [0.6, 0.3, 0.1],
+            [0.1, 0.8, 0.1],
+        ]
+    )
+    labels = np.array([2, 1, 0, 1])
+
+    report = _tune_decision_threshold(stage, signal, labels, [0, 1, 2])
+    prediction = _apply_target_class_threshold(
+        signal,
+        report["target_class"],
+        report["selected_threshold"],
+    )
+
+    assert report["selected_threshold"] == 0.5
+    assert prediction.tolist() == labels.tolist()
+
+
+def test_confusion_matrix_plot_is_saved(tmp_path):
+    path = tmp_path / "confusion_matrix_normalized_true.jpg"
+
+    save_confusion_matrix_plot([0, 0, 1, 1], [0, 1, 1, 1], path, normalize="true")
+
+    assert path.exists()
+    assert path.stat().st_size > 0
 
 
 def test_positive_quantile_replaces_zero_with_finite_log_floor():
@@ -525,6 +570,7 @@ def test_multi_base_stacking_saves_stage_metrics(tmp_path):
     assert artifacts["base_physics_metrics"] == run_root / "metrics" / "base_physics_metrics.json"
     assert artifacts["base_optics_signals"] == run_root / "metrics" / "base_optics_signals.npz"
     assert artifacts["base_physics_signals"] == run_root / "metrics" / "base_physics_signals.npz"
+    assert artifacts["final_ablation_metrics"] == run_root / "metrics" / "final_ablation_metrics.json"
     assert [stage["name"] for stage in stage_metrics["stages"]] == ["optics", "physics", "final"]
     assert "train_oof_metrics" in stage_metrics["stages"][0]
     assert "base_optics_signal" in predictions.columns
@@ -534,6 +580,7 @@ def test_multi_base_stacking_saves_stage_metrics(tmp_path):
     refreshed_stage_metrics = json.loads((run_root / "metrics" / "stage_metrics.json").read_text())
 
     assert final_artifacts["final_metrics"] == run_root / "metrics" / "final_metrics.json"
+    assert final_artifacts["final_ablation_metrics"] == run_root / "metrics" / "final_ablation_metrics.json"
     assert [stage["name"] for stage in refreshed_stage_metrics["stages"]] == ["optics", "physics", "final"]
 
 

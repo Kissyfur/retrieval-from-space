@@ -7,7 +7,7 @@ import pandas as pd
 
 from retrieval_from_space.config import PipelineConfig
 from retrieval_from_space.logging import setup_logger
-from retrieval_from_space.metrics.classification import classification_metrics
+from retrieval_from_space.metrics.classification import classification_metrics, save_confusion_matrix_plot
 from retrieval_from_space.metrics.regression import regression_metrics
 from retrieval_from_space.paths import RunPaths
 from retrieval_from_space.state import PipelineState
@@ -53,12 +53,30 @@ def evaluate(config: PipelineConfig, paths: RunPaths, state: PipelineState) -> d
         raise FileNotFoundError(f"Predictions file does not exist: {predictions_path}")
     predictions = pd.read_csv(predictions_path)
     problem_type = config.problem.type or predictions["problem_type"].iloc[0]
+    metrics_path = paths.metrics / "metrics.json"
+    existing_metrics = (
+        json.loads(metrics_path.read_text(encoding="utf-8")) if metrics_path.exists() else {}
+    )
     if problem_type == "classification":
         metrics = classification_metrics(predictions["y_true"], predictions["y_pred"])
+        if "decision_thresholds" in existing_metrics:
+            metrics["decision_thresholds"] = existing_metrics["decision_thresholds"]
+        save_confusion_matrix_plot(
+            predictions["y_true"],
+            predictions["y_pred"],
+            paths.metrics / "confusion_matrix.jpg",
+            title="Confusion matrix",
+        )
+        save_confusion_matrix_plot(
+            predictions["y_true"],
+            predictions["y_pred"],
+            paths.metrics / "confusion_matrix_normalized_true.jpg",
+            normalize="true",
+            title="Confusion matrix normalized by true label",
+        )
     else:
         metrics = regression_metrics(predictions["y_true"], predictions["y_pred"])
 
-    metrics_path = paths.metrics / "metrics.json"
     metrics_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     report_path = paths.reports / "summary.md"
     stage_metrics_path = paths.metrics / "stage_metrics.json"

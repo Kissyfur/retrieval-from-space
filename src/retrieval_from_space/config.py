@@ -223,6 +223,7 @@ class ModelStageConfig:
     standardize: bool = False
     sample_weight: Any = None
     augmentation: dict[str, Any] = field(default_factory=dict)
+    decision_thresholds: dict[str, Any] = field(default_factory=dict)
     hyperparameter_search: HyperparameterSearchConfig = field(default_factory=HyperparameterSearchConfig)
 
     @classmethod
@@ -235,6 +236,7 @@ class ModelStageConfig:
             standardize=bool(data.get("standardize", False)),
             sample_weight=data.get("sample_weight", data.get("make_sample_weight")),
             augmentation=dict(data.get("augmentation", {})),
+            decision_thresholds=dict(data.get("decision_thresholds", {})),
             hyperparameter_search=HyperparameterSearchConfig.from_dict(data.get("hyperparameter_search")),
         )
 
@@ -273,6 +275,9 @@ class ModelConfig(ModelStageConfig):
             feature_groups=[str(v) for v in data.get("feature_groups", [])],
             params=dict(data.get("params", {})),
             standardize=bool(data.get("standardize", False)),
+            sample_weight=data.get("sample_weight", data.get("make_sample_weight")),
+            augmentation=dict(data.get("augmentation", {})),
+            decision_thresholds=dict(data.get("decision_thresholds", {})),
             hyperparameter_search=HyperparameterSearchConfig.from_dict(data.get("hyperparameter_search")),
             strategy=strategy,
             include_base_prediction=bool(data.get("include_base_prediction", True)),
