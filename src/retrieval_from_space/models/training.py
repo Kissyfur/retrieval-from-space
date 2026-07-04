@@ -1497,6 +1497,7 @@ def _input_selection_settings(stage: ModelStageConfig, problem_type: str) -> dic
         "candidates": raw.get("candidates", raw.get("variants")),
         "tie_tolerance": float(raw.get("tie_tolerance", raw.get("score_tolerance", 0.0))),
         "tie_breaker": str(raw.get("tie_breaker", "score")).lower(),
+        "preferred_variants": [str(name) for name in raw.get("preferred_variants", [])],
     }
 
 
@@ -1609,6 +1610,12 @@ def _select_input_selection_row(
     best_score = max(row["score"] for row in rows)
     tolerance = max(float(settings.get("tie_tolerance", 0.0)), 0.0)
     contenders = [row for row in rows if row["score"] >= best_score - tolerance]
+    tie_breaker = str(settings.get("tie_breaker", "score")).lower()
+    if tie_breaker in {"preferred", "preferred_variant", "preferred_variants", "priority"}:
+        by_name = {row["name"]: row for row in contenders}
+        for name in settings.get("preferred_variants", []):
+            if name in by_name:
+                return by_name[name]
     return max(contenders, key=lambda row: _input_selection_sort_key(row, settings))
 
 
@@ -1725,6 +1732,7 @@ def _select_final_input_variant(
         "scoring": settings["scoring"],
         "tie_tolerance": settings["tie_tolerance"],
         "tie_breaker": settings["tie_breaker"],
+        "preferred_variants": settings.get("preferred_variants", []),
         "selected_variant": selected["name"],
         "selected_score": float(selected["score"]),
         "selected_params": selected["selected_params"],

@@ -21,6 +21,7 @@ from retrieval_from_space.models.training import _target_for_stage
 from retrieval_from_space.models.training import _augment_training_data
 from retrieval_from_space.models.training import _apply_target_class_threshold
 from retrieval_from_space.models.training import _make_sample_weights
+from retrieval_from_space.models.training import _select_input_selection_row
 from retrieval_from_space.models.training import _tune_decision_threshold
 from retrieval_from_space.models.training import train_final_model
 from retrieval_from_space.models.training import train_model
@@ -100,6 +101,8 @@ def test_load_pseudonitzschia_cnn_classification_config():
     assert config.model.final_model.decision_thresholds["target_rate_multiplier"] == 1.4
     assert 0.5 in config.model.final_model.decision_thresholds["grid"]
     assert config.model.final_model.input_selection["enabled"] is True
+    assert config.model.final_model.input_selection["tie_breaker"] == "preferred_variant"
+    assert config.model.final_model.input_selection["preferred_variants"][0] == "all_signals_plus_metadata"
     assert "environment_signal_plus_metadata" in config.model.final_model.input_selection["candidates"]
     assert len(config.model.base_models["optics"].hyperparameter_search.candidates) == 3
     assert len(config.model.base_models["environment"].hyperparameter_search.candidates) == 3
@@ -203,6 +206,41 @@ def test_decision_threshold_penalizes_target_overprediction():
     assert report["selected_selection_score"] == report["selection_best_score"]
     assert report["target_rate_penalty"]["selected_penalty"] == 0.0
     assert raw_best["target_rate_penalty"] > 0.0
+
+
+def test_input_selection_prefers_priority_variant_within_tolerance():
+    rows = [
+        {"name": "base_signals_only", "score": 0.50, "feature_count": 6},
+        {"name": "all_signals_plus_metadata", "score": 0.495, "feature_count": 15},
+        {"name": "metadata_only", "score": 0.47, "feature_count": 9},
+    ]
+    selected = _select_input_selection_row(
+        rows,
+        {
+            "tie_tolerance": 0.01,
+            "tie_breaker": "preferred_variant",
+            "preferred_variants": ["all_signals_plus_metadata", "base_signals_only"],
+        },
+    )
+
+    assert selected["name"] == "all_signals_plus_metadata"
+
+
+def test_input_selection_does_not_prefer_variant_outside_tolerance():
+    rows = [
+        {"name": "base_signals_only", "score": 0.50, "feature_count": 6},
+        {"name": "all_signals_plus_metadata", "score": 0.48, "feature_count": 15},
+    ]
+    selected = _select_input_selection_row(
+        rows,
+        {
+            "tie_tolerance": 0.01,
+            "tie_breaker": "preferred_variant",
+            "preferred_variants": ["all_signals_plus_metadata", "base_signals_only"],
+        },
+    )
+
+    assert selected["name"] == "base_signals_only"
 
 
 def test_confusion_matrix_plot_is_saved(tmp_path):

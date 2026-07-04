@@ -185,7 +185,14 @@ model:
       scoring: f1_macro
       cv: 5
       tie_tolerance: 0.01
-      tie_breaker: target_class_recall
+      tie_breaker: preferred_variant
+      preferred_variants:
+        - all_signals_plus_metadata
+        - environment_signal_plus_metadata
+        - base_signals_only
+        - environment_signal_only
+        - optics_signal_plus_metadata
+        - metadata_only
       candidates:
         - all_signals_plus_metadata
         - environment_signal_plus_metadata
