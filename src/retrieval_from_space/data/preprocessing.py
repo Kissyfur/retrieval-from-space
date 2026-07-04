@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+import operator
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -15,6 +17,17 @@ from retrieval_from_space.features.transforms import interpolate_dataset, positi
 
 VARIABLE = "variable"
 ORDERED_CUBE_DIMS = ("Id", "lat", "lon", "time", VARIABLE)
+_DERIVED_OPERATORS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: "safe_divide",
+    ast.Pow: operator.pow,
+}
+_DERIVED_UNARY_OPERATORS = {
+    ast.UAdd: operator.pos,
+    ast.USub: operator.neg,
+}
 
 
 def _option(product: ProductSpec, key: str, default: Any) -> Any:
@@ -98,6 +111,76 @@ def _safe_log1p(data: xr.DataArray) -> xr.DataArray:
     return np.log1p(data.where(data > -1))
 
 
+def _safe_divide(left: xr.DataArray, right: xr.DataArray, epsilon: float) -> xr.DataArray:
+    return left / right.where(np.abs(right) > epsilon)
+
+
+def _evaluate_derived_expression(
+    node: ast.AST,
+    variables: dict[str, xr.DataArray],
+    epsilon: float,
+) -> xr.DataArray | float:
+    if isinstance(node, ast.Expression):
+        return _evaluate_derived_expression(node.body, variables, epsilon)
+    if isinstance(node, ast.Name):
+        if node.id not in variables:
+            raise ValueError(f"Derived variable expression references unknown variable: {node.id}")
+        return variables[node.id]
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        return float(node.value)
+    if isinstance(node, ast.BinOp):
+        left = _evaluate_derived_expression(node.left, variables, epsilon)
+        right = _evaluate_derived_expression(node.right, variables, epsilon)
+        op = _DERIVED_OPERATORS.get(type(node.op))
+        if op is None:
+            raise ValueError(f"Unsupported operator in derived variable expression: {type(node.op).__name__}")
+        if op == "safe_divide":
+            return _safe_divide(left, right, epsilon)
+        return op(left, right)
+    if isinstance(node, ast.UnaryOp):
+        operand = _evaluate_derived_expression(node.operand, variables, epsilon)
+        op = _DERIVED_UNARY_OPERATORS.get(type(node.op))
+        if op is None:
+            raise ValueError(f"Unsupported unary operator in derived variable expression: {type(node.op).__name__}")
+        return op(operand)
+    raise ValueError(f"Unsupported syntax in derived variable expression: {type(node).__name__}")
+
+
+def _derived_variable_specs(product: ProductSpec) -> list[dict[str, str]]:
+    specs = _as_list(product.preprocess.get("derived_variables"))
+    normalized = []
+    for spec in specs:
+        if not isinstance(spec, dict):
+            raise ValueError("Each derived variable must be a mapping with 'name' and 'expression'.")
+        name = str(spec.get("name", "")).strip()
+        expression = str(spec.get("expression", spec.get("expr", ""))).strip()
+        if not name or not expression:
+            raise ValueError("Each derived variable must define non-empty 'name' and 'expression'.")
+        normalized.append({"name": name, "expression": expression})
+    return normalized
+
+
+def _add_derived_variables(data: xr.DataArray, product: ProductSpec) -> xr.DataArray:
+    specs = _derived_variable_specs(product)
+    if not specs:
+        return data
+    if VARIABLE not in data.coords:
+        raise ValueError("Derived variables require a 'variable' coordinate.")
+
+    epsilon = float(product.preprocess.get("derived_variables_epsilon", 1e-12))
+    variables = {str(name): data.sel({VARIABLE: name}) for name in data[VARIABLE].values}
+    derived = []
+    for spec in specs:
+        tree = ast.parse(spec["expression"], mode="eval")
+        value = _evaluate_derived_expression(tree, variables, epsilon)
+        if not isinstance(value, xr.DataArray):
+            value = xr.zeros_like(next(iter(variables.values()))) + float(value)
+        value = value.expand_dims({VARIABLE: [spec["name"]]})
+        derived.append(value)
+        variables[spec["name"]] = value.sel({VARIABLE: spec["name"]})
+    return xr.concat([data] + derived, dim=VARIABLE, coords="minimal")
+
+
 def _prepare_product_array(
     ds: xr.Dataset,
     product: ProductSpec,
@@ -119,6 +202,8 @@ def _prepare_product_array(
             _option(product, "positive_quantile_dims", ("Id", "time", "lat", "lon"))
         )
         data = positive_quantile(data, quantile=float(quantile), dims=quantile_dims)
+
+    data = _add_derived_variables(data, product)
 
     if bool(_option(product, "log", defaults.preprocess.log_products)):
         data = _safe_log(data)

@@ -128,7 +128,7 @@ model:
         repetitions: 10
         seed: 42
         noise_std:
-          nut: [0.20, 0.20, 0.20, 0.0, 0.20, 0.20]
+          nut: [0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.0, 0.20, 0.20]
           car: [0.20, 0.20, 0.20, 0.0, 0.20, 0.20, 0.20, 0.20]
           phy: [0.20, 0.20, 0.0, 0.20, 0.20, 0.20, 0.20, 0.20]
       hyperparameter_search:
@@ -175,7 +175,22 @@ model:
       tune: true
       target_class: 2
       scoring: f1_macro
+      tie_tolerance: 0.005
+      tie_breaker: target_class_recall
       grid: [0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60]
+    input_selection:
+      enabled: true
+      scoring: f1_macro
+      cv: 5
+      tie_tolerance: 0.01
+      tie_breaker: target_class_recall
+      candidates:
+        - all_signals_plus_metadata
+        - environment_signal_plus_metadata
+        - optics_signal_plus_metadata
+        - base_signals_only
+        - environment_signal_only
+        - metadata_only
     hyperparameter_search:
       enabled: true
       cv: 5
@@ -261,6 +276,16 @@ products:
       time_limit: 16
       interpolate_dims: [lat, lon, time]
       positive_quantile:
+      derived_variables:
+        - name: din
+          expression: no3 + nh4
+        - name: n_div_p
+          expression: no3 / po4
+        - name: din_div_p
+          expression: (no3 + nh4) / po4
+        - name: nh4_div_no3
+          expression: nh4 / no3
+      derived_variables_epsilon: 0.000000000001
       log1p: true
       add_cloud_land_masks: true
       mask_kinds: [land_mask]
@@ -430,14 +455,14 @@ cnn_training:
 
   standardization_variables:
     optics: ["412", "442", "490", "510", "560", "673", ADG443, APH443, BBP443, CHL, DIATO]
-    nut: [nh4, no3, po4, nh4_anom, no3_anom, po4_anom, n_div_p, chl, phyc]
+    nut: [nh4, no3, po4, din, n_div_p, din_div_p, nh4_div_no3, chl, phyc]
     car: [dissic, ph, talk, fpco2, spco2, nppv, o2]
     phy: [bottomT, thetao, so, uo, vo, zos, mlotst, speed, so_anom, thetao_anom, bottomT_anom, zos_anom]
 
   augmentation:
     std_x:
       optics: [0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.0, 0.0]
-      nut: [0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.0]
+      nut: [0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.0, 0.20, 0.20]
       car: [0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.0]
       phy: [0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.0]
       meta: 0.0

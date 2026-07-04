@@ -82,13 +82,23 @@ def test_load_pseudonitzschia_cnn_classification_config():
     assert config.model.base_models["environment"].augmentation["enabled"] is True
     assert config.model.base_models["environment"].augmentation["repetitions"] == 10
     environment_noise = config.model.base_models["environment"].augmentation["noise_std"]
-    assert sum(len(environment_noise[group]) for group in ["nut", "car", "phy"]) == 22
+    assert sum(len(environment_noise[group]) for group in ["nut", "car", "phy"]) == 26
+    nutrient_preprocess = next(product.preprocess for product in config.products if product.name == "nutrients")
+    assert [spec["name"] for spec in nutrient_preprocess["derived_variables"]] == [
+        "din",
+        "n_div_p",
+        "din_div_p",
+        "nh4_div_no3",
+    ]
     assert config.model.base_model is None
     assert config.model.final_model.family == "random_forest"
     assert config.model.final_model.feature_groups == ["meta"]
     assert config.model.final_model.decision_thresholds["enabled"] is True
     assert config.model.final_model.decision_thresholds["target_class"] == 2
+    assert config.model.final_model.decision_thresholds["tie_breaker"] == "target_class_recall"
     assert 0.5 in config.model.final_model.decision_thresholds["grid"]
+    assert config.model.final_model.input_selection["enabled"] is True
+    assert "environment_signal_plus_metadata" in config.model.final_model.input_selection["candidates"]
     assert len(config.model.base_models["optics"].hyperparameter_search.candidates) == 3
     assert len(config.model.base_models["environment"].hyperparameter_search.candidates) == 3
     assert config.products[0].name == "reflectance"
@@ -126,19 +136,25 @@ def test_decision_threshold_tunes_target_class_from_oof_probabilities():
         decision_thresholds={
             "enabled": True,
             "target_class": 2,
-            "grid": [0.3, 0.5],
+            "grid": [0.5, 0.55],
             "scoring": "f1_macro",
+            "tie_tolerance": 0.3,
+            "tie_breaker": "target_class_recall",
         }
     )
     signal = np.array(
         [
-            [0.1, 0.2, 0.7],
-            [0.1, 0.55, 0.35],
-            [0.6, 0.3, 0.1],
-            [0.1, 0.8, 0.1],
+            [0.1, 0.38, 0.52],
+            [0.1, 0.38, 0.52],
+            [0.1, 0.38, 0.52],
+            [0.1, 0.38, 0.52],
+            [0.1, 0.38, 0.52],
+            [0.1, 0.38, 0.52],
+            [0.8, 0.1, 0.1],
+            [0.8, 0.1, 0.1],
         ]
     )
-    labels = np.array([2, 1, 0, 1])
+    labels = np.array([2, 1, 1, 1, 1, 1, 0, 0])
 
     report = _tune_decision_threshold(stage, signal, labels, [0, 1, 2])
     prediction = _apply_target_class_threshold(
@@ -148,7 +164,8 @@ def test_decision_threshold_tunes_target_class_from_oof_probabilities():
     )
 
     assert report["selected_threshold"] == 0.5
-    assert prediction.tolist() == labels.tolist()
+    assert report["primary_best_score"] > report["selected_score"]
+    assert prediction.tolist().count(2) == 6
 
 
 def test_confusion_matrix_plot_is_saved(tmp_path):
@@ -408,6 +425,74 @@ def test_preprocess_keeps_common_ids_within_feature_group(tmp_path):
     assert group.sizes["variable"] == 2
 
 
+def test_preprocess_adds_derived_nutrient_variables_before_log1p(tmp_path):
+    paths = RunPaths(tmp_path / "run").ensure()
+    targets = pd.DataFrame(
+        {
+            "Id": [1],
+            "lat": [40.0],
+            "lon": [1.0],
+            "time": [pd.Timestamp("2020-01-15")],
+            "target": [1.0],
+        }
+    )
+    targets.to_csv(paths.processed / "targets.csv", index=False)
+    shape = (1, 1, 1, 1)
+    xr.Dataset(
+        {
+            "nh4": (("Id", "lat", "lon", "time"), np.full(shape, 1.0, dtype=np.float32)),
+            "no3": (("Id", "lat", "lon", "time"), np.full(shape, 4.0, dtype=np.float32)),
+            "po4": (("Id", "lat", "lon", "time"), np.full(shape, 2.0, dtype=np.float32)),
+        },
+        coords={"Id": [1], "lat": [0], "lon": [0], "time": [0]},
+    ).to_netcdf(paths.matchups / "nutrients.nc")
+    config = PipelineConfig(
+        target=TargetConfig(path=str(tmp_path / "unused.csv"), target_column="target"),
+        products=[
+            ProductSpec(
+                name="nutrients",
+                dataset_ids=["unused"],
+                variables=["nh4", "no3", "po4"],
+                feature_group="nut",
+                preprocess={
+                    "positive_quantile": None,
+                    "derived_variables": [
+                        {"name": "din", "expression": "no3 + nh4"},
+                        {"name": "n_div_p", "expression": "no3 / po4"},
+                        {"name": "din_div_p", "expression": "(no3 + nh4) / po4"},
+                        {"name": "nh4_div_no3", "expression": "nh4 / no3"},
+                    ],
+                    "log": False,
+                    "log1p": True,
+                    "add_cloud_land_masks": False,
+                    "fillna": 0.0,
+                },
+            )
+        ],
+    )
+
+    artifacts = preprocess_matchups(config, paths.root)
+    group = xr.load_dataarray(artifacts["nut"])
+
+    assert group["variable"].values.tolist() == [
+        "nh4",
+        "no3",
+        "po4",
+        "din",
+        "n_div_p",
+        "din_div_p",
+        "nh4_div_no3",
+    ]
+    values = {
+        str(name): float(group.sel(variable=name).values.reshape(-1)[0])
+        for name in group["variable"].values
+    }
+    assert np.isclose(values["din"], np.log1p(5.0))
+    assert np.isclose(values["n_div_p"], np.log1p(2.0))
+    assert np.isclose(values["din_div_p"], np.log1p(2.5))
+    assert np.isclose(values["nh4_div_no3"], np.log1p(0.25))
+
+
 def test_cnn3d_loader_preserves_cube_shape(tmp_path):
     datasets_dir = tmp_path / "datasets"
     datasets_dir.mkdir()
@@ -558,6 +643,12 @@ def test_multi_base_stacking_saves_stage_metrics(tmp_path):
                 family="random_forest",
                 feature_groups=["meta"],
                 params={"n_estimators": 3, "random_state": 44},
+                input_selection={
+                    "enabled": True,
+                    "scoring": "r2",
+                    "cv": 2,
+                    "candidates": ["metadata_only", "all_signals_plus_metadata"],
+                },
             ),
         ),
     )
@@ -570,8 +661,11 @@ def test_multi_base_stacking_saves_stage_metrics(tmp_path):
     assert artifacts["base_physics_metrics"] == run_root / "metrics" / "base_physics_metrics.json"
     assert artifacts["base_optics_signals"] == run_root / "metrics" / "base_optics_signals.npz"
     assert artifacts["base_physics_signals"] == run_root / "metrics" / "base_physics_signals.npz"
+    assert artifacts["final_input_selection_metrics"] == run_root / "metrics" / "final_input_selection_metrics.json"
     assert artifacts["final_ablation_metrics"] == run_root / "metrics" / "final_ablation_metrics.json"
     assert [stage["name"] for stage in stage_metrics["stages"]] == ["optics", "physics", "final"]
+    assert stage_metrics["stages"][-1]["input_selection"]["enabled"] is True
+    assert stage_metrics["stages"][-1]["input_variant"] in {"metadata_only", "all_signals_plus_metadata"}
     assert "train_oof_metrics" in stage_metrics["stages"][0]
     assert "base_optics_signal" in predictions.columns
     assert "base_physics_signal" in predictions.columns
@@ -580,6 +674,7 @@ def test_multi_base_stacking_saves_stage_metrics(tmp_path):
     refreshed_stage_metrics = json.loads((run_root / "metrics" / "stage_metrics.json").read_text())
 
     assert final_artifacts["final_metrics"] == run_root / "metrics" / "final_metrics.json"
+    assert final_artifacts["final_input_selection_metrics"] == run_root / "metrics" / "final_input_selection_metrics.json"
     assert final_artifacts["final_ablation_metrics"] == run_root / "metrics" / "final_ablation_metrics.json"
     assert [stage["name"] for stage in refreshed_stage_metrics["stages"]] == ["optics", "physics", "final"]
 

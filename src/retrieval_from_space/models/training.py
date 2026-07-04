@@ -123,6 +123,8 @@ def _default_base_stage(config: ModelConfig) -> ModelStageConfig:
         standardize=config.standardize,
         sample_weight=config.sample_weight,
         augmentation=dict(config.augmentation),
+        decision_thresholds=dict(config.decision_thresholds),
+        input_selection=dict(config.input_selection),
         hyperparameter_search=config.hyperparameter_search,
     )
 
@@ -626,6 +628,8 @@ def _threshold_settings(stage: ModelStageConfig) -> dict[str, Any]:
         "threshold": raw.get("threshold"),
         "grid": raw.get("grid", raw.get("thresholds")),
         "scoring": str(raw.get("scoring", "f1_macro")),
+        "tie_tolerance": float(raw.get("tie_tolerance", raw.get("score_tolerance", 0.0))),
+        "tie_breaker": str(raw.get("tie_breaker", "score")).lower(),
     }
 
 
@@ -702,6 +706,43 @@ def _score_threshold_candidate(
     return float(metrics[scoring]), metrics
 
 
+def _class_metric_from_confusion_matrix(metrics: dict[str, Any], target_class: int) -> dict[str, float]:
+    matrix = np.asarray(metrics.get("confusion_matrix", []), dtype=float)
+    if matrix.ndim != 2 or target_class < 0 or target_class >= matrix.shape[0]:
+        return {
+            "target_class_precision": 0.0,
+            "target_class_recall": 0.0,
+            "target_class_f1": 0.0,
+        }
+    true_positive = matrix[target_class, target_class]
+    predicted = matrix[:, target_class].sum()
+    actual = matrix[target_class, :].sum()
+    precision = float(true_positive / predicted) if predicted else 0.0
+    recall = float(true_positive / actual) if actual else 0.0
+    f1 = float(2 * precision * recall / (precision + recall)) if precision + recall else 0.0
+    return {
+        "target_class_precision": precision,
+        "target_class_recall": recall,
+        "target_class_f1": f1,
+    }
+
+
+def _select_threshold_candidate(candidates: list[dict[str, Any]], settings: dict[str, Any]) -> dict[str, Any]:
+    best_score = max(row["score"] for row in candidates)
+    tolerance = max(float(settings.get("tie_tolerance", 0.0)), 0.0)
+    contenders = [row for row in candidates if row["score"] >= best_score - tolerance]
+    tie_breaker = str(settings.get("tie_breaker", "score")).lower()
+    if tie_breaker in {"target_recall", "target_class_recall", "recall"}:
+        return max(contenders, key=lambda row: (row.get("target_class_recall", 0.0), row["score"], -row["threshold"]))
+    if tie_breaker in {"target_f1", "target_class_f1"}:
+        return max(contenders, key=lambda row: (row.get("target_class_f1", 0.0), row["score"], -row["threshold"]))
+    if tie_breaker in {"lower_threshold", "lower"}:
+        return min(contenders, key=lambda row: (row["threshold"], -row["score"]))
+    if tie_breaker in {"higher_threshold", "higher"}:
+        return max(contenders, key=lambda row: (row["threshold"], row["score"]))
+    return max(contenders, key=lambda row: (row["score"], -row["threshold"]))
+
+
 def _tune_decision_threshold(
     stage: ModelStageConfig,
     train_signal: np.ndarray,
@@ -724,15 +765,18 @@ def _tune_decision_threshold(
     for threshold in _threshold_grid(settings):
         y_pred = _apply_target_class_threshold(train_signal, target_class, threshold)
         score, metrics = _score_threshold_candidate(y_train_labels, y_pred, label_values, scoring)
+        target_metrics = _class_metric_from_confusion_matrix(metrics, target_class)
         candidates.append(
             {
                 "threshold": float(threshold),
                 "score": score,
                 "metrics": metrics,
+                **target_metrics,
                 "predicted_distribution": _class_distribution(y_pred),
             }
         )
-    best = max(candidates, key=lambda row: row["score"])
+    best_score = max(row["score"] for row in candidates)
+    best = _select_threshold_candidate(candidates, settings)
     return {
         "enabled": True,
         "tuned": bool(settings.get("tune", True)),
@@ -740,6 +784,11 @@ def _tune_decision_threshold(
         "selected_threshold": float(best["threshold"]),
         "scoring": scoring,
         "selected_score": float(best["score"]),
+        "primary_best_score": float(best_score),
+        "tie_tolerance": float(settings.get("tie_tolerance", 0.0)),
+        "tie_breaker": settings.get("tie_breaker", "score"),
+        "selected_target_class_recall": float(best.get("target_class_recall", 0.0)),
+        "selected_target_class_f1": float(best.get("target_class_f1", 0.0)),
         "candidates": candidates,
     }
 
@@ -1363,6 +1412,20 @@ def _metadata_feature_columns(datasets_dir: Path, group_names: list[str], fallba
     return [f"meta_{idx}" for idx in range(fallback_width)]
 
 
+def _input_selection_settings(stage: ModelStageConfig, problem_type: str) -> dict[str, Any]:
+    raw = dict(stage.input_selection or {})
+    if not raw or not bool(raw.get("enabled", False)):
+        return {"enabled": False}
+    return {
+        "enabled": True,
+        "scoring": str(raw.get("scoring", _default_scoring(problem_type))),
+        "cv": raw.get("cv"),
+        "candidates": raw.get("candidates", raw.get("variants")),
+        "tie_tolerance": float(raw.get("tie_tolerance", raw.get("score_tolerance", 0.0))),
+        "tie_breaker": str(raw.get("tie_breaker", "score")).lower(),
+    }
+
+
 def _final_feature_variants(
     x_meta_train: np.ndarray,
     x_meta_test: np.ndarray,
@@ -1396,6 +1459,14 @@ def _final_feature_variants(
             "feature_columns": base_columns,
         }
     )
+    variants.append(
+        {
+            "name": "all_signals_plus_metadata",
+            "x_train": np.hstack([base_train_all, x_meta_train]),
+            "x_test": np.hstack([base_test_all, x_meta_test]),
+            "feature_columns": base_columns + meta_columns,
+        }
+    )
     for (base_name, train_signal), (_, test_signal) in zip(base_train_signals, base_test_signals):
         signal_columns = _base_signal_columns(base_name, train_signal)
         slug = _stage_slug(base_name)
@@ -1416,6 +1487,177 @@ def _final_feature_variants(
             }
         )
     return variants
+
+
+def _default_final_variant_name(include_base_prediction: bool, variants: list[dict[str, Any]]) -> str:
+    names = {variant["name"] for variant in variants}
+    if include_base_prediction and "all_signals_plus_metadata" in names:
+        return "all_signals_plus_metadata"
+    return "metadata_only"
+
+
+def _filter_final_input_variants(
+    variants: list[dict[str, Any]],
+    requested: Any,
+) -> list[dict[str, Any]]:
+    if not requested:
+        return variants
+    requested_names = [str(name) for name in requested]
+    by_name = {variant["name"]: variant for variant in variants}
+    missing = [name for name in requested_names if name not in by_name]
+    if missing:
+        raise ValueError(f"Unknown final input selection candidate(s): {missing}. Available: {list(by_name)}")
+    return [by_name[name] for name in requested_names]
+
+
+def _score_from_metrics(metrics: dict[str, Any], scoring: str) -> float:
+    if scoring not in metrics:
+        available = ", ".join(sorted(metrics))
+        raise ValueError(f"Unsupported scoring '{scoring}'. Available: {available}.")
+    return float(metrics[scoring])
+
+
+def _input_selection_sort_key(row: dict[str, Any], settings: dict[str, Any]):
+    tie_breaker = str(settings.get("tie_breaker", "score")).lower()
+    if tie_breaker in {"target_recall", "target_class_recall", "recall"}:
+        return (row.get("target_class_recall", 0.0), row["score"], -row["feature_count"])
+    if tie_breaker in {"target_f1", "target_class_f1"}:
+        return (row.get("target_class_f1", 0.0), row["score"], -row["feature_count"])
+    if tie_breaker in {"simpler", "fewest_features", "feature_count"}:
+        return (-row["feature_count"], row["score"])
+    return (row["score"], -row["feature_count"])
+
+
+def _select_input_selection_row(
+    rows: list[dict[str, Any]],
+    settings: dict[str, Any],
+) -> dict[str, Any]:
+    best_score = max(row["score"] for row in rows)
+    tolerance = max(float(settings.get("tie_tolerance", 0.0)), 0.0)
+    contenders = [row for row in rows if row["score"] >= best_score - tolerance]
+    return max(contenders, key=lambda row: _input_selection_sort_key(row, settings))
+
+
+def _evaluate_final_variant_oof(
+    config: PipelineConfig,
+    problem_type: str,
+    final_problem_type: str,
+    final_stage: ModelStageConfig,
+    final_y_train: np.ndarray,
+    y_train_labels: np.ndarray,
+    train_metric_target: np.ndarray,
+    label_values,
+    variant: dict[str, Any],
+    settings: dict[str, Any],
+) -> dict[str, Any]:
+    selected_params, cv_results = _select_params(
+        final_problem_type,
+        final_stage,
+        variant["x_train"],
+        final_y_train,
+        config.problem.random_state,
+        split_labels=y_train_labels if final_problem_type == "classification" else None,
+        score_labels=y_train_labels if final_problem_type == "classification" else None,
+        stage_name=f"final:{variant['name']}",
+    )
+    configured_cv = settings.get("cv")
+    oof_cv = int(configured_cv) if configured_cv else max(
+        2,
+        final_stage.hyperparameter_search.cv if final_stage.hyperparameter_search.enabled else 5,
+    )
+    oof_signal = _out_of_fold_signal(
+        final_problem_type,
+        final_stage,
+        variant["x_train"],
+        final_y_train,
+        selected_params,
+        config.problem.random_state,
+        oof_cv,
+        split_labels=y_train_labels if final_problem_type == "classification" else None,
+        stage_name=f"final:{variant['name']}",
+    )
+    decision_threshold_report = None
+    if final_problem_type == "classification":
+        decision_threshold_report = _tune_decision_threshold(
+            final_stage,
+            oof_signal,
+            y_train_labels,
+            label_values,
+        )
+        oof_pred = _classification_prediction_from_signal(oof_signal, decision_threshold_report)
+    else:
+        oof_pred = _prediction_labels(final_problem_type, oof_signal)
+    metrics = _evaluate(problem_type, train_metric_target, oof_pred, label_values)
+    score = _score_from_metrics(metrics, settings["scoring"])
+    target_metrics = {}
+    if final_problem_type == "classification":
+        target_class = (
+            decision_threshold_report["target_class"]
+            if decision_threshold_report and decision_threshold_report.get("enabled")
+            else (label_values[-1] if label_values else np.asarray(oof_signal).shape[1] - 1)
+        )
+        target_metrics = _class_metric_from_confusion_matrix(metrics, int(target_class))
+    return {
+        "name": variant["name"],
+        "feature_count": int(variant["x_train"].shape[1]),
+        "feature_columns": variant["feature_columns"],
+        "selected_params": selected_params,
+        "cv_results": cv_results,
+        "oof_cv": oof_cv,
+        "oof_metrics": metrics,
+        "score": score,
+        "decision_thresholds": decision_threshold_report,
+        **target_metrics,
+    }
+
+
+def _select_final_input_variant(
+    config: PipelineConfig,
+    problem_type: str,
+    final_problem_type: str,
+    final_stage: ModelStageConfig,
+    variants: list[dict[str, Any]],
+    final_y_train: np.ndarray,
+    y_train_labels: np.ndarray,
+    train_metric_target: np.ndarray,
+    label_values,
+) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any] | None]:
+    settings = _input_selection_settings(final_stage, problem_type)
+    by_name = {variant["name"]: variant for variant in variants}
+    if not settings["enabled"] or config.model.strategy != "stacking":
+        selected_name = _default_final_variant_name(config.model.include_base_prediction, variants)
+        return by_name[selected_name], None, None
+
+    candidate_variants = _filter_final_input_variants(variants, settings.get("candidates"))
+    rows = []
+    for variant in tqdm(candidate_variants, desc="Final input variants", unit="variant"):
+        rows.append(
+            _evaluate_final_variant_oof(
+                config,
+                problem_type,
+                final_problem_type,
+                final_stage,
+                final_y_train,
+                y_train_labels,
+                train_metric_target,
+                label_values,
+                variant,
+                settings,
+            )
+        )
+    selected = _select_input_selection_row(rows, settings)
+    report = {
+        "enabled": True,
+        "scoring": settings["scoring"],
+        "tie_tolerance": settings["tie_tolerance"],
+        "tie_breaker": settings["tie_breaker"],
+        "selected_variant": selected["name"],
+        "selected_score": float(selected["score"]),
+        "selected_params": selected["selected_params"],
+        "decision_thresholds": selected.get("decision_thresholds"),
+        "candidates": rows,
+    }
+    return by_name[selected["name"]], report, selected
 
 
 def _final_variant_metrics(
@@ -1563,12 +1805,6 @@ def _train_final_from_base_signals(
     x_final_test_meta, _ = _load_matrix_for_groups(
         paths["datasets"], split_ids["test"], final_stage.feature_groups, final_stage
     )
-    if config.model.include_base_prediction:
-        x_final_train = np.hstack([signal for _, signal in base_train_signals] + [x_final_train_meta])
-        x_final_test = np.hstack([signal for _, signal in base_test_signals] + [x_final_test_meta])
-    else:
-        x_final_train = x_final_train_meta
-        x_final_test = x_final_test_meta
 
     if strategy == "residual_correction":
         final_y_train = y_train - base_train_signals[0][1].reshape(-1)
@@ -1577,37 +1813,71 @@ def _train_final_from_base_signals(
         final_problem_type = problem_type
         final_y_train = _target_for_stage(final_problem_type, final_stage, y_train, y_train_labels)
 
-    final_params, final_cv_results = _select_params(
+    train_metric_target = _metric_target(problem_type, y_train, y_train_labels)
+    test_metric_target = _metric_target(problem_type, y_test_target, y_test_labels)
+    meta_columns = _metadata_feature_columns(paths["datasets"], final_groups, x_final_train_meta.shape[1])
+    final_variants = _final_feature_variants(
+        x_final_train_meta,
+        x_final_test_meta,
+        meta_columns,
+        base_train_signals,
+        base_test_signals,
+    )
+    selected_variant, input_selection_report, selected_input_row = _select_final_input_variant(
+        config,
+        problem_type,
         final_problem_type,
         final_stage,
-        x_final_train,
+        final_variants,
         final_y_train,
-        config.problem.random_state,
-        split_labels=y_train_labels if final_problem_type == "classification" else None,
-        score_labels=y_train_labels if final_problem_type == "classification" else None,
-        stage_name="final",
+        y_train_labels,
+        train_metric_target,
+        label_values,
     )
+    x_final_train = selected_variant["x_train"]
+    x_final_test = selected_variant["x_test"]
+
     final_oof_signal = None
     decision_threshold_report = None
-    if final_problem_type == "classification" and _threshold_settings(final_stage)["enabled"]:
-        final_oof_cv = max(2, final_stage.hyperparameter_search.cv if final_stage.hyperparameter_search.enabled else 5)
-        final_oof_signal = _out_of_fold_signal(
+    final_oof_metrics = None
+    if selected_input_row:
+        final_params = selected_input_row["selected_params"]
+        final_cv_results = selected_input_row["cv_results"]
+        decision_threshold_report = selected_input_row.get("decision_thresholds")
+        final_oof_metrics = selected_input_row.get("oof_metrics")
+    else:
+        final_params, final_cv_results = _select_params(
             final_problem_type,
             final_stage,
             x_final_train,
             final_y_train,
-            final_params,
             config.problem.random_state,
-            final_oof_cv,
-            split_labels=y_train_labels,
-            stage_name="final threshold",
+            split_labels=y_train_labels if final_problem_type == "classification" else None,
+            score_labels=y_train_labels if final_problem_type == "classification" else None,
+            stage_name="final",
         )
-        decision_threshold_report = _tune_decision_threshold(
-            final_stage,
-            final_oof_signal,
-            y_train_labels,
-            label_values,
-        )
+        if final_problem_type == "classification" and _threshold_settings(final_stage)["enabled"]:
+            final_oof_cv = max(
+                2,
+                final_stage.hyperparameter_search.cv if final_stage.hyperparameter_search.enabled else 5,
+            )
+            final_oof_signal = _out_of_fold_signal(
+                final_problem_type,
+                final_stage,
+                x_final_train,
+                final_y_train,
+                final_params,
+                config.problem.random_state,
+                final_oof_cv,
+                split_labels=y_train_labels,
+                stage_name="final threshold",
+            )
+            decision_threshold_report = _tune_decision_threshold(
+                final_stage,
+                final_oof_signal,
+                y_train_labels,
+                label_values,
+            )
     final_model, final_scaler = _fit_estimator(
         final_problem_type,
         final_stage,
@@ -1629,8 +1899,6 @@ def _train_final_from_base_signals(
     else:
         y_pred = final_raw_pred
 
-    train_metric_target = _metric_target(problem_type, y_train, y_train_labels)
-    test_metric_target = _metric_target(problem_type, y_test_target, y_test_labels)
     x_final_train_proc = _transform_with_scaler(x_final_train, final_scaler)
     if strategy == "residual_correction":
         final_train_pred = base_train_signals[0][1].reshape(-1) + final_model.predict(x_final_train_proc)
@@ -1642,7 +1910,6 @@ def _train_final_from_base_signals(
 
     metrics = _evaluate(problem_type, test_metric_target, y_pred, label_values)
     final_train_metrics = _evaluate(problem_type, train_metric_target, final_train_pred, label_values)
-    final_oof_metrics = None
     if final_oof_signal is not None:
         final_oof_pred = _classification_prediction_from_signal(final_oof_signal, decision_threshold_report)
         final_oof_metrics = _evaluate(problem_type, train_metric_target, final_oof_pred, label_values)
@@ -1659,6 +1926,11 @@ def _train_final_from_base_signals(
             paths["models"] / "final", final_model, final_scaler, final_params, final_cv_results
         ).items()}
     )
+    if input_selection_report:
+        artifacts["final_input_selection_metrics"] = _write_json(
+            paths["metrics"] / "final_input_selection_metrics.json",
+            input_selection_report,
+        )
     artifacts["model"] = artifacts["final_model"]
     base_prediction_columns = []
     extra_prediction_columns = {}
@@ -1676,6 +1948,9 @@ def _train_final_from_base_signals(
         "name": "final",
         "family": final_stage.family,
         "feature_groups": final_groups,
+        "input_variant": selected_variant["name"],
+        "input_feature_count": int(x_final_train.shape[1]),
+        "input_feature_columns": selected_variant["feature_columns"],
         "base_prediction_columns": base_prediction_columns,
         "selected_params": final_params,
         "cv_results": final_cv_results,
@@ -1687,6 +1962,15 @@ def _train_final_from_base_signals(
         final_report["train_oof_metrics"] = final_oof_metrics
     if decision_threshold_report:
         final_report["decision_thresholds"] = decision_threshold_report
+    if input_selection_report:
+        final_report["input_selection"] = {
+            "enabled": True,
+            "selected_variant": input_selection_report["selected_variant"],
+            "selected_score": input_selection_report["selected_score"],
+            "scoring": input_selection_report["scoring"],
+            "tie_tolerance": input_selection_report["tie_tolerance"],
+            "tie_breaker": input_selection_report["tie_breaker"],
+        }
     ablation_path = _save_final_ablation_report(
         config,
         problem_type,
@@ -1723,8 +2007,12 @@ def _train_final_from_base_signals(
         "final_model": {
             "family": final_stage.family,
             "feature_groups": final_groups,
+            "input_variant": selected_variant["name"],
+            "input_feature_count": int(x_final_train.shape[1]),
+            "input_feature_columns": selected_variant["feature_columns"],
             "base_prediction_columns": base_prediction_columns,
             "decision_thresholds": decision_threshold_report,
+            "input_selection": input_selection_report,
         },
         "stages": list(base_reports) + [final_report],
         "final_metrics": metrics,
@@ -1748,6 +2036,9 @@ def _train_final_from_base_signals(
                 "include_base_prediction": config.model.include_base_prediction,
                 "base_selected_params": base_param_payload,
                 "final_selected_params": final_params,
+                "final_input_variant": selected_variant["name"],
+                "final_input_feature_columns": selected_variant["feature_columns"],
+                "final_input_selection": input_selection_report,
                 "base_prediction_columns": base_prediction_columns,
                 "decision_thresholds": decision_threshold_report,
                 "class_distribution": split_distribution,
