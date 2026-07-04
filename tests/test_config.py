@@ -96,6 +96,8 @@ def test_load_pseudonitzschia_cnn_classification_config():
     assert config.model.final_model.decision_thresholds["enabled"] is True
     assert config.model.final_model.decision_thresholds["target_class"] == 2
     assert config.model.final_model.decision_thresholds["tie_breaker"] == "target_class_recall"
+    assert config.model.final_model.decision_thresholds["target_rate_penalty"] == 1.0
+    assert config.model.final_model.decision_thresholds["target_rate_multiplier"] == 1.4
     assert 0.5 in config.model.final_model.decision_thresholds["grid"]
     assert config.model.final_model.input_selection["enabled"] is True
     assert "environment_signal_plus_metadata" in config.model.final_model.input_selection["candidates"]
@@ -166,6 +168,41 @@ def test_decision_threshold_tunes_target_class_from_oof_probabilities():
     assert report["selected_threshold"] == 0.5
     assert report["primary_best_score"] > report["selected_score"]
     assert prediction.tolist().count(2) == 6
+
+
+def test_decision_threshold_penalizes_target_overprediction():
+    stage = ModelStageConfig(
+        decision_thresholds={
+            "enabled": True,
+            "target_class": 2,
+            "grid": [0.5, 0.55],
+            "scoring": "f1_macro",
+            "target_rate_penalty": 1.0,
+            "target_rate_multiplier": 1.0,
+        }
+    )
+    signal = np.array(
+        [
+            [0.1, 0.38, 0.52],
+            [0.1, 0.38, 0.52],
+            [0.1, 0.38, 0.52],
+            [0.1, 0.38, 0.52],
+            [0.1, 0.8, 0.1],
+            [0.1, 0.8, 0.1],
+            [0.8, 0.1, 0.1],
+            [0.8, 0.1, 0.1],
+        ]
+    )
+    labels = np.array([2, 2, 1, 1, 1, 1, 0, 0])
+
+    report = _tune_decision_threshold(stage, signal, labels, [0, 1, 2])
+    raw_best = max(report["candidates"], key=lambda row: row["score"])
+
+    assert raw_best["threshold"] == 0.5
+    assert report["selected_threshold"] == 0.55
+    assert report["selected_selection_score"] == report["selection_best_score"]
+    assert report["target_rate_penalty"]["selected_penalty"] == 0.0
+    assert raw_best["target_rate_penalty"] > 0.0
 
 
 def test_confusion_matrix_plot_is_saved(tmp_path):

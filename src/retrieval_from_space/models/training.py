@@ -630,6 +630,10 @@ def _threshold_settings(stage: ModelStageConfig) -> dict[str, Any]:
         "scoring": str(raw.get("scoring", "f1_macro")),
         "tie_tolerance": float(raw.get("tie_tolerance", raw.get("score_tolerance", 0.0))),
         "tie_breaker": str(raw.get("tie_breaker", "score")).lower(),
+        "target_rate_penalty": float(raw.get("target_rate_penalty", 0.0)),
+        "target_rate_multiplier": raw.get("target_rate_multiplier"),
+        "target_rate_tolerance": raw.get("target_rate_tolerance"),
+        "max_target_prediction_rate": raw.get("max_target_prediction_rate"),
     }
 
 
@@ -728,19 +732,73 @@ def _class_metric_from_confusion_matrix(metrics: dict[str, Any], target_class: i
 
 
 def _select_threshold_candidate(candidates: list[dict[str, Any]], settings: dict[str, Any]) -> dict[str, Any]:
-    best_score = max(row["score"] for row in candidates)
+    score_key = "selection_score"
+    best_score = max(row.get(score_key, row["score"]) for row in candidates)
     tolerance = max(float(settings.get("tie_tolerance", 0.0)), 0.0)
-    contenders = [row for row in candidates if row["score"] >= best_score - tolerance]
+    contenders = [row for row in candidates if row.get(score_key, row["score"]) >= best_score - tolerance]
     tie_breaker = str(settings.get("tie_breaker", "score")).lower()
     if tie_breaker in {"target_recall", "target_class_recall", "recall"}:
-        return max(contenders, key=lambda row: (row.get("target_class_recall", 0.0), row["score"], -row["threshold"]))
+        return max(
+            contenders,
+            key=lambda row: (
+                row.get("target_class_recall", 0.0),
+                row.get(score_key, row["score"]),
+                row["score"],
+                -row["threshold"],
+            ),
+        )
     if tie_breaker in {"target_f1", "target_class_f1"}:
-        return max(contenders, key=lambda row: (row.get("target_class_f1", 0.0), row["score"], -row["threshold"]))
+        return max(
+            contenders,
+            key=lambda row: (
+                row.get("target_class_f1", 0.0),
+                row.get(score_key, row["score"]),
+                row["score"],
+                -row["threshold"],
+            ),
+        )
     if tie_breaker in {"lower_threshold", "lower"}:
-        return min(contenders, key=lambda row: (row["threshold"], -row["score"]))
+        return min(contenders, key=lambda row: (row["threshold"], -row.get(score_key, row["score"])))
     if tie_breaker in {"higher_threshold", "higher"}:
-        return max(contenders, key=lambda row: (row["threshold"], row["score"]))
-    return max(contenders, key=lambda row: (row["score"], -row["threshold"]))
+        return max(contenders, key=lambda row: (row["threshold"], row.get(score_key, row["score"])))
+    return max(contenders, key=lambda row: (row.get(score_key, row["score"]), row["score"], -row["threshold"]))
+
+
+def _target_prediction_rate_limit(settings: dict[str, Any], target_actual_rate: float) -> float | None:
+    if settings.get("max_target_prediction_rate") is not None:
+        return float(settings["max_target_prediction_rate"])
+    multiplier = settings.get("target_rate_multiplier")
+    tolerance = settings.get("target_rate_tolerance")
+    if multiplier is None and tolerance is None:
+        return target_actual_rate if float(settings.get("target_rate_penalty", 0.0)) > 0 else None
+    limit = target_actual_rate
+    if multiplier is not None:
+        limit = target_actual_rate * float(multiplier)
+    if tolerance is not None:
+        limit += float(tolerance)
+    return max(0.0, min(1.0, float(limit)))
+
+
+def _target_rate_penalty_payload(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    target_class: int,
+    settings: dict[str, Any],
+) -> dict[str, float | None]:
+    target_actual_rate = float(np.mean(np.asarray(y_true).reshape(-1) == target_class))
+    target_prediction_rate = float(np.mean(np.asarray(y_pred).reshape(-1) == target_class))
+    limit = _target_prediction_rate_limit(settings, target_actual_rate)
+    penalty_weight = max(float(settings.get("target_rate_penalty", 0.0)), 0.0)
+    excess = max(0.0, target_prediction_rate - limit) if limit is not None else 0.0
+    penalty = penalty_weight * excess
+    return {
+        "target_actual_rate": target_actual_rate,
+        "target_prediction_rate": target_prediction_rate,
+        "target_prediction_rate_limit": limit,
+        "target_prediction_rate_excess": excess,
+        "target_rate_penalty_weight": penalty_weight,
+        "target_rate_penalty": penalty,
+    }
 
 
 def _tune_decision_threshold(
@@ -766,16 +824,21 @@ def _tune_decision_threshold(
         y_pred = _apply_target_class_threshold(train_signal, target_class, threshold)
         score, metrics = _score_threshold_candidate(y_train_labels, y_pred, label_values, scoring)
         target_metrics = _class_metric_from_confusion_matrix(metrics, target_class)
+        rate_payload = _target_rate_penalty_payload(y_train_labels, y_pred, target_class, settings)
+        selection_score = score - float(rate_payload["target_rate_penalty"])
         candidates.append(
             {
                 "threshold": float(threshold),
                 "score": score,
+                "selection_score": selection_score,
                 "metrics": metrics,
                 **target_metrics,
+                **rate_payload,
                 "predicted_distribution": _class_distribution(y_pred),
             }
         )
     best_score = max(row["score"] for row in candidates)
+    best_selection_score = max(row["selection_score"] for row in candidates)
     best = _select_threshold_candidate(candidates, settings)
     return {
         "enabled": True,
@@ -784,11 +847,22 @@ def _tune_decision_threshold(
         "selected_threshold": float(best["threshold"]),
         "scoring": scoring,
         "selected_score": float(best["score"]),
+        "selected_selection_score": float(best["selection_score"]),
         "primary_best_score": float(best_score),
+        "selection_best_score": float(best_selection_score),
         "tie_tolerance": float(settings.get("tie_tolerance", 0.0)),
         "tie_breaker": settings.get("tie_breaker", "score"),
         "selected_target_class_recall": float(best.get("target_class_recall", 0.0)),
         "selected_target_class_f1": float(best.get("target_class_f1", 0.0)),
+        "target_rate_penalty": {
+            "weight": float(settings.get("target_rate_penalty", 0.0)),
+            "multiplier": settings.get("target_rate_multiplier"),
+            "tolerance": settings.get("target_rate_tolerance"),
+            "max_prediction_rate": settings.get("max_target_prediction_rate"),
+            "selected_target_prediction_rate": best.get("target_prediction_rate"),
+            "selected_target_prediction_rate_limit": best.get("target_prediction_rate_limit"),
+            "selected_penalty": best.get("target_rate_penalty"),
+        },
         "candidates": candidates,
     }
 
