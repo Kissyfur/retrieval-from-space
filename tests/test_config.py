@@ -22,10 +22,12 @@ from retrieval_from_space.models.training import _augment_training_data
 from retrieval_from_space.models.training import _apply_target_class_threshold
 from retrieval_from_space.models.training import _make_sample_weights
 from retrieval_from_space.models.training import _select_input_selection_row
+from retrieval_from_space.models.training import _splitter
 from retrieval_from_space.models.training import _tune_decision_threshold
 from retrieval_from_space.models.training import train_final_model
 from retrieval_from_space.models.training import train_model
 from retrieval_from_space.models.cnn import KerasCNN3DEstimator
+from retrieval_from_space.models.factory import create_model
 from retrieval_from_space.metrics.classification import save_confusion_matrix_plot
 from retrieval_from_space.paths import RunPaths
 from retrieval_from_space.pipeline.download import download_products
@@ -94,6 +96,7 @@ def test_load_pseudonitzschia_cnn_classification_config():
     assert config.model.base_model is None
     assert config.model.final_model.family == "random_forest"
     assert config.model.final_model.feature_groups == ["meta"]
+    assert config.model.final_model.sample_weight["mode"] == "balanced"
     assert config.model.final_model.decision_thresholds["enabled"] is True
     assert config.model.final_model.decision_thresholds["target_class"] == 2
     assert config.model.final_model.decision_thresholds["tie_breaker"] == "target_class_recall"
@@ -106,6 +109,11 @@ def test_load_pseudonitzschia_cnn_classification_config():
     assert "environment_signal_plus_metadata" in config.model.final_model.input_selection["candidates"]
     assert len(config.model.base_models["optics"].hyperparameter_search.candidates) == 3
     assert len(config.model.base_models["environment"].hyperparameter_search.candidates) == 3
+    assert config.model.final_model.hyperparameter_search.repeats == 2
+    final_families = {
+        candidate["family"] for candidate in config.model.final_model.hyperparameter_search.candidates
+    }
+    assert final_families == {"random_forest", "xgboost"}
     assert config.products[0].name == "reflectance"
     assert config.products[0].preprocess["mask_kinds"] == ["cloud_mask", "land_mask"]
     assert config.products[0].preprocess["min_valid_ratio"] == 0.3
@@ -134,6 +142,35 @@ def test_tree_stage_uses_hard_labels_when_pipeline_targets_are_soft():
 
     assert tree_target.tolist() == [1, 0]
     assert np.allclose(cnn_target, soft)
+
+
+def test_candidate_family_override_creates_xgboost_model():
+    pytest.importorskip("xgboost")
+
+    stage = ModelStageConfig(family="random_forest", params={"random_state": 42})
+    model = create_model(
+        "classification",
+        stage,
+        params={
+            "family": "xgboost",
+            "n_estimators": 5,
+            "max_depth": 2,
+            "tree_method": "hist",
+            "eval_metric": "mlogloss",
+        },
+    )
+
+    assert model.__class__.__name__ == "XGBClassifier"
+
+
+def test_splitter_supports_repeated_stratified_cv():
+    splitter = _splitter("classification", cv=3, random_state=42, repeats=2)
+    x = np.zeros((12, 2))
+    y = np.array([0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2])
+
+    splits = list(splitter.split(x, y))
+
+    assert len(splits) == 6
 
 
 def test_decision_threshold_tunes_target_class_from_oof_probabilities():

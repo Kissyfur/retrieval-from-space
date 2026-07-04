@@ -6,8 +6,11 @@ from retrieval_from_space.models.tree import random_forest, xgboost_model
 
 
 def create_model(problem_type: str, config: ModelStageConfig, params: dict | None = None):
-    family = config.family.lower()
-    model_params = {**config.params, **({} if params is None else params)}
+    candidate_params = {} if params is None else dict(params)
+    family = str(
+        candidate_params.pop("family", candidate_params.pop("model_family", config.family))
+    ).lower()
+    model_params = {**config.params, **candidate_params}
     if family in {"random_forest", "rf", "auto"}:
         return random_forest(problem_type, **model_params)
     if family in {"xgboost", "xgb"}:

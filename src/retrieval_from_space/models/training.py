@@ -10,7 +10,13 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 from sklearn.metrics import get_scorer
-from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
+from sklearn.model_selection import (
+    KFold,
+    RepeatedKFold,
+    RepeatedStratifiedKFold,
+    StratifiedKFold,
+    train_test_split,
+)
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from tqdm.auto import tqdm
 
@@ -106,8 +112,16 @@ class ArrayStandardizer:
         return self.fit(x).transform(x)
 
 
-def _stage_uses_cnn3d(stage: ModelStageConfig | ModelConfig) -> bool:
-    return stage.family.lower() in {"cnn3d", "3d_cnn"}
+def _effective_family(stage: ModelStageConfig | ModelConfig, params: dict[str, Any] | None = None) -> str:
+    params = {} if params is None else params
+    return str(params.get("family", params.get("model_family", stage.family))).lower()
+
+
+def _stage_uses_cnn3d(
+    stage: ModelStageConfig | ModelConfig,
+    params: dict[str, Any] | None = None,
+) -> bool:
+    return _effective_family(stage, params) in {"cnn3d", "3d_cnn"}
 
 
 def _stage_slug(name: str) -> str:
@@ -252,9 +266,18 @@ def _default_scoring(problem_type: str) -> str:
     return "f1_macro" if problem_type == "classification" else "r2"
 
 
-def _splitter(problem_type: str, cv: int, random_state: int):
+def _splitter(problem_type: str, cv: int, random_state: int, repeats: int = 1):
+    repeats = max(1, int(repeats))
     if problem_type == "classification":
+        if repeats > 1:
+            return RepeatedStratifiedKFold(
+                n_splits=cv,
+                n_repeats=repeats,
+                random_state=random_state,
+            )
         return StratifiedKFold(n_splits=cv, shuffle=True, random_state=random_state)
+    if repeats > 1:
+        return RepeatedKFold(n_splits=cv, n_repeats=repeats, random_state=random_state)
     return KFold(n_splits=cv, shuffle=True, random_state=random_state)
 
 
@@ -265,12 +288,17 @@ def _classification_labels(prediction: np.ndarray) -> np.ndarray:
     return prediction.reshape(-1)
 
 
-def _validate_target_compatibility(problem_type: str, stage: ModelStageConfig, y: np.ndarray) -> None:
+def _validate_target_compatibility(
+    problem_type: str,
+    stage: ModelStageConfig,
+    y: np.ndarray,
+    params: dict[str, Any] | None = None,
+) -> None:
     if problem_type != "classification":
         return
     if np.asarray(y).ndim <= 1:
         return
-    family = stage.family.lower()
+    family = _effective_family(stage, params)
     if family not in {"cnn", "cnn1d", "1d_cnn", "cnn3d", "3d_cnn"}:
         raise ValueError(
             "Probability-vector classification targets require a model family that accepts "
@@ -450,7 +478,7 @@ def _fit_estimator(
     random_state: int = 42,
     progress_description: str | None = None,
 ):
-    _validate_target_compatibility(problem_type, stage, y)
+    _validate_target_compatibility(problem_type, stage, y, params)
     x_proc, scaler = _fit_scaler_if_needed(x, stage)
     sample_weight, sample_weight_info = _make_sample_weights(problem_type, stage, y_labels)
     x_fit, y_fit, labels_fit, sample_weight_fit, augmentation_info = _augment_training_data(
@@ -512,7 +540,7 @@ def _select_params(
         return candidates[0], []
 
     scorer = get_scorer(search.scoring or _default_scoring(problem_type))
-    splitter = _splitter(problem_type, search.cv, random_state)
+    splitter = _splitter(problem_type, search.cv, random_state, repeats=search.repeats)
     split_y = y if split_labels is None else split_labels
     score_y = y if score_labels is None else score_labels
     cv_results = []
@@ -551,6 +579,8 @@ def _select_params(
             {
                 "candidate_index": index,
                 "params": params,
+                "cv": int(search.cv),
+                "repeats": int(search.repeats),
                 "scores": scores,
                 "mean_score": mean_score,
                 "std_score": std_score,
@@ -1114,7 +1144,7 @@ def _train_direct(
     direct_report = {
         "stage": "direct",
         "name": "direct",
-        "family": stage.family,
+        "family": _effective_family(stage, selected_params),
         "feature_groups": group_names,
         "selected_params": selected_params,
         "cv_results": cv_results,
@@ -1227,7 +1257,7 @@ def _fit_base_stage(
     base_report = {
         "stage": "base",
         "name": base_name,
-        "family": base_stage.family,
+        "family": _effective_family(base_stage, base_params),
         "feature_groups": base_groups,
         "selected_params": base_params,
         "cv_results": base_cv_results,
@@ -1733,6 +1763,12 @@ def _select_final_input_variant(
         "tie_tolerance": settings["tie_tolerance"],
         "tie_breaker": settings["tie_breaker"],
         "preferred_variants": settings.get("preferred_variants", []),
+        "hyperparameter_search": {
+            "enabled": bool(final_stage.hyperparameter_search.enabled),
+            "cv": int(final_stage.hyperparameter_search.cv),
+            "repeats": int(final_stage.hyperparameter_search.repeats),
+            "candidate_count": len(_candidate_pool(final_stage)),
+        },
         "selected_variant": selected["name"],
         "selected_score": float(selected["score"]),
         "selected_params": selected["selected_params"],
@@ -2028,7 +2064,7 @@ def _train_final_from_base_signals(
     final_report = {
         "stage": "final",
         "name": "final",
-        "family": final_stage.family,
+        "family": _effective_family(final_stage, final_params),
         "feature_groups": final_groups,
         "input_variant": selected_variant["name"],
         "input_feature_count": int(x_final_train.shape[1]),
@@ -2087,7 +2123,7 @@ def _train_final_from_base_signals(
             for name, _ in base_train_signals
         },
         "final_model": {
-            "family": final_stage.family,
+            "family": _effective_family(final_stage, final_params),
             "feature_groups": final_groups,
             "input_variant": selected_variant["name"],
             "input_feature_count": int(x_final_train.shape[1]),
