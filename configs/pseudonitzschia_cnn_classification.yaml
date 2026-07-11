@@ -107,6 +107,22 @@ model:
             learning_rate: 0.0001
             name: m
             metrics: [accuracy]
+          - dims: [4, 4, 4, 4]
+            kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [7, 7, 15]]
+            output_dim: 3
+            dropout: 0.2
+            reg_factor: 0.0005
+            learning_rate: 0.0001
+            name: m_dropout
+            metrics: [accuracy]
+          - dims: [8, 8, 4, 4]
+            kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [7, 7, 15]]
+            output_dim: 3
+            dropout: 0.1
+            reg_factor: 0.0005
+            learning_rate: 0.00005
+            name: wider_slow
+            metrics: [accuracy]
     environment:
       family: cnn3d
       feature_groups: [nut, car, phy]
@@ -160,89 +176,36 @@ model:
             learning_rate: 0.0001
             name: l
             metrics: [accuracy]
+          - dims: [16, 8, 4, 4]
+            kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [5, 5, 15]]
+            output_dim: 3
+            dropout: 0.2
+            reg_factor: 0.0005
+            learning_rate: 0.0001
+            name: m_dropout
+            metrics: [accuracy]
+          - dims: [32, 16, 8, 4]
+            kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [5, 5, 15]]
+            output_dim: 3
+            dropout: 0.1
+            reg_factor: 0.0005
+            learning_rate: 0.00005
+            name: wider_slow
+            metrics: [accuracy]
   final_model:
     family: random_forest
     feature_groups: [meta]
     standardize: false
-    sample_weight:
-      mode: balanced
     params:
       random_state: 42
-    decision_thresholds:
-      enabled: true
-      tune: true
-      target_class: 2
-      scoring: f1_macro
-      tie_tolerance: 0.005
-      tie_breaker: target_class_recall
-      target_rate_penalty: 1.0
-      target_rate_multiplier: 1.4
-      grid: [0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60]
-    input_selection:
-      enabled: true
-      scoring: f1_macro
-      cv: 5
-      tie_tolerance: 0.01
-      tie_breaker: preferred_variant
-      preferred_variants:
-        - all_signals_plus_metadata
-        - environment_signal_plus_metadata
-        - base_signals_only
-        - environment_signal_only
-        - optics_signal_plus_metadata
-        - metadata_only
-      candidates:
-        - all_signals_plus_metadata
-        - environment_signal_plus_metadata
-        - optics_signal_plus_metadata
-        - base_signals_only
-        - environment_signal_only
-        - metadata_only
+      n_estimators: 600
+      max_depth: 6
+      min_samples_leaf: 5
+      class_weight: balanced
+      n_jobs: -1
     hyperparameter_search:
-      enabled: true
-      cv: 5
-      repeats: 2
+      enabled: false
       scoring: f1_macro
-      candidates:
-        - family: random_forest
-          n_estimators: 400
-          max_depth: 4
-          min_samples_leaf: 4
-          n_jobs: -1
-        - family: random_forest
-          n_estimators: 600
-          max_depth: 6
-          min_samples_leaf: 5
-          n_jobs: -1
-        - family: random_forest
-          n_estimators: 1000
-          max_depth: 8
-          min_samples_leaf: 3
-          n_jobs: -1
-        - family: xgboost
-          n_estimators: 200
-          max_depth: 3
-          learning_rate: 0.03
-          subsample: 0.8
-          colsample_bytree: 0.8
-          min_child_weight: 2
-          reg_lambda: 2.0
-          objective: multi:softprob
-          eval_metric: mlogloss
-          tree_method: hist
-          n_jobs: -1
-        - family: xgboost
-          n_estimators: 300
-          max_depth: 4
-          learning_rate: 0.02
-          subsample: 0.9
-          colsample_bytree: 0.9
-          min_child_weight: 1
-          reg_lambda: 1.0
-          objective: multi:softprob
-          eval_metric: mlogloss
-          tree_method: hist
-          n_jobs: -1
 
 products:
   - name: reflectance
@@ -427,6 +390,7 @@ products:
       interpolate_dims: [lat, lon, time]
       positive_quantile:
       log1p: true
+      exclude_from_log1p: [ph]
       add_cloud_land_masks: true
       mask_kinds: [land_mask]
       fillna: 0.0

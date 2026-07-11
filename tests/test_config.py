@@ -10,6 +10,7 @@ from src.config import (
     ModelConfig,
     ModelStageConfig,
     PipelineConfig,
+    PreprocessConfig,
     ProblemConfig,
     ProductSpec,
     TargetConfig,
@@ -393,6 +394,53 @@ def test_preprocess_keeps_common_ids_within_feature_group(tmp_path):
     assert group.sizes["variable"] == 2
 
 
+def test_min_valid_ratio_uses_selected_time_window(tmp_path):
+    paths = RunPaths(tmp_path / "run").ensure()
+    targets = pd.DataFrame(
+        {
+            "Id": [1, 2],
+            "lat": [40.0, 41.0],
+            "lon": [1.0, 2.0],
+            "time": [pd.Timestamp("2020-01-15"), pd.Timestamp("2020-01-16")],
+            "target": [1.0, 2.0],
+        }
+    )
+    targets.to_csv(paths.processed / "targets.csv", index=False)
+
+    values = np.ones((2, 1, 1, 4), dtype=np.float32)
+    values[0, :, :, :2] = np.nan
+    xr.Dataset(
+        {"rrs": (("Id", "lat", "lon", "time"), values)},
+        coords={"Id": [1, 2], "lat": [0], "lon": [0], "time": [0, 1, 2, 3]},
+    ).to_netcdf(paths.matchups / "reflectance.nc")
+
+    config = PipelineConfig(
+        target=TargetConfig(path=str(tmp_path / "unused.csv"), target_column="target"),
+        preprocess=PreprocessConfig(time_limit=2),
+        products=[
+            ProductSpec(
+                name="reflectance",
+                dataset_ids=["unused"],
+                variables=["rrs"],
+                feature_group="optics",
+                preprocess={
+                    "positive_quantile": None,
+                    "log": False,
+                    "add_cloud_land_masks": True,
+                    "mask_kinds": ["cloud_mask", "land_mask"],
+                    "min_valid_ratio": 0.3,
+                    "fillna": 0.0,
+                },
+            )
+        ],
+    )
+
+    artifacts = preprocess_matchups(config, paths.root)
+    group = xr.load_dataarray(artifacts["optics"])
+
+    assert group["Id"].values.tolist() == [2]
+
+
 def test_preprocess_adds_derived_nutrient_variables_before_log1p(tmp_path):
     paths = RunPaths(tmp_path / "run").ensure()
     targets = pd.DataFrame(
@@ -461,6 +509,54 @@ def test_preprocess_adds_derived_nutrient_variables_before_log1p(tmp_path):
     assert np.isclose(values["nh4_div_no3"], np.log1p(0.25))
 
 
+def test_preprocess_can_exclude_variables_from_log1p(tmp_path):
+    paths = RunPaths(tmp_path / "run").ensure()
+    targets = pd.DataFrame(
+        {
+            "Id": [1],
+            "lat": [40.0],
+            "lon": [1.0],
+            "time": [pd.Timestamp("2020-01-15")],
+            "target": [1.0],
+        }
+    )
+    targets.to_csv(paths.processed / "targets.csv", index=False)
+    shape = (1, 1, 1, 1)
+    xr.Dataset(
+        {
+            "dissic": (("Id", "lat", "lon", "time"), np.full(shape, 3.0, dtype=np.float32)),
+            "ph": (("Id", "lat", "lon", "time"), np.full(shape, 8.1, dtype=np.float32)),
+        },
+        coords={"Id": [1], "lat": [0], "lon": [0], "time": [0]},
+    ).to_netcdf(paths.matchups / "carbon.nc")
+
+    config = PipelineConfig(
+        target=TargetConfig(path=str(tmp_path / "unused.csv"), target_column="target"),
+        products=[
+            ProductSpec(
+                name="carbon",
+                dataset_ids=["unused"],
+                variables=["dissic", "ph"],
+                feature_group="car",
+                preprocess={
+                    "positive_quantile": None,
+                    "log": False,
+                    "log1p": True,
+                    "exclude_from_log1p": ["ph"],
+                    "add_cloud_land_masks": False,
+                    "fillna": 0.0,
+                },
+            )
+        ],
+    )
+
+    artifacts = preprocess_matchups(config, paths.root)
+    group = xr.load_dataarray(artifacts["car"])
+
+    assert np.isclose(float(group.sel(variable="dissic").values.reshape(-1)[0]), np.log1p(3.0))
+    assert np.isclose(float(group.sel(variable="ph").values.reshape(-1)[0]), 8.1)
+
+
 def test_cnn3d_loader_preserves_cube_shape(tmp_path):
     datasets_dir = tmp_path / "datasets"
     datasets_dir.mkdir()
@@ -475,6 +571,7 @@ def test_cnn3d_loader_preserves_cube_shape(tmp_path):
             "variable": ["a", "b", "c"],
         },
     )
+    data.values[0, 0, 0, 0, 0] = np.nan
     data.to_netcdf(datasets_dir / "optics.nc")
 
     cnn_x, _ = _load_matrix_for_groups(
@@ -491,7 +588,9 @@ def test_cnn3d_loader_preserves_cube_shape(tmp_path):
     )
 
     assert cnn_x.shape == (2, 2, 2, 2, 3)
+    assert np.isfinite(cnn_x).all()
     assert tree_x.shape == (2, 24)
+    assert np.isnan(tree_x).sum() == 1
 
 
 def test_balanced_weights_and_augmentation_preserve_targets():

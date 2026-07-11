@@ -183,9 +183,11 @@ def _load_matrix_for_groups(
         raise FileNotFoundError(f"Missing feature group files: {missing}")
     if stage is not None and _stage_uses_cnn3d(stage):
         x = np.concatenate([_load_group(path, ids, flatten=False) for path in group_paths], axis=-1)
+        x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
     else:
         x = np.hstack([_load_group(path, ids) for path in group_paths])
-    return np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0), [path.stem for path in group_paths]
+        x = np.where(np.isinf(x), np.nan, x)
+    return x, [path.stem for path in group_paths]
 
 
 def _load_training_data(datasets_dir: Path, config: PipelineConfig):

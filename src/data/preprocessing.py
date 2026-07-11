@@ -111,6 +111,24 @@ def _safe_log1p(data: xr.DataArray) -> xr.DataArray:
     return np.log1p(data.where(data > -1))
 
 
+def _transform_except_variables(
+    data: xr.DataArray,
+    transform,
+    excluded_variables: list[Any],
+) -> xr.DataArray:
+    excluded = {str(value) for value in excluded_variables}
+    if not excluded or VARIABLE not in data.coords:
+        return transform(data)
+
+    transformed = transform(data)
+    keep_original = xr.DataArray(
+        [str(value) in excluded for value in data[VARIABLE].values],
+        dims=[VARIABLE],
+        coords={VARIABLE: data[VARIABLE].values},
+    )
+    return data.where(keep_original, transformed)
+
+
 def _safe_divide(left: xr.DataArray, right: xr.DataArray, epsilon: float) -> xr.DataArray:
     return left / right.where(np.abs(right) > epsilon)
 
@@ -206,9 +224,9 @@ def _prepare_product_array(
     data = _add_derived_variables(data, product)
 
     if bool(_option(product, "log", defaults.preprocess.log_products)):
-        data = _safe_log(data)
+        data = _transform_except_variables(data, _safe_log, _as_list(product.preprocess.get("exclude_from_log")))
     if bool(_option(product, "log1p", False)):
-        data = _safe_log1p(data)
+        data = _transform_except_variables(data, _safe_log1p, _as_list(product.preprocess.get("exclude_from_log1p")))
 
     if bool(_option(product, "prefix_variables", defaults.preprocess.prefix_variables)):
         names = [f"{product.name}:{name}" for name in data[VARIABLE].values]
@@ -226,13 +244,14 @@ def _prepare_product_array(
     ordered_dims = tuple(dim for dim in ORDERED_CUBE_DIMS if dim in data.dims)
     data = data.transpose(*ordered_dims)
 
+    time_limit = _option(product, "time_limit", defaults.preprocess.time_limit)
+    data = _select_time(data, time_limit)
+
     min_valid_ratio = _option(product, "min_valid_ratio", defaults.preprocess.min_valid_ratio)
     if min_valid_ratio is not None and "cloud_mask" in data[VARIABLE].values and "land_mask" in data[VARIABLE].values:
         ratio = valid_water_coverage(data.sel({VARIABLE: "cloud_mask"}), data.sel({VARIABLE: "land_mask"}))
         data = data.isel(Id=(ratio >= float(min_valid_ratio)).values)
 
-    time_limit = _option(product, "time_limit", defaults.preprocess.time_limit)
-    data = _select_time(data, time_limit)
     data = _use_relative_cube_coordinates(data)
 
     fillna = _option(product, "fillna", defaults.preprocess.fillna)
