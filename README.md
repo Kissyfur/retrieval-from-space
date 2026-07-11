@@ -207,7 +207,7 @@ hyperparameter_search:
 
 ## Notes
 
-Raw local data and generated artifacts are intentionally ignored by git. Notebooks were removed from the active project surface; reusable logic now lives under `src/retrieval_from_space/`, and user-facing commands live under `bin/`.
+Raw local data and generated artifacts are intentionally ignored by git. Notebooks were removed from the active project surface; reusable logic now lives under `src/`, and user-facing commands live under `bin/`.
 
 ## GPU Setup
 

@@ -2,16 +2,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from retrieval_from_space.config import PipelineConfig
-from retrieval_from_space.data.matchups import create_product_matchups, save_matchups
-from retrieval_from_space.data.targets import load_target_table, save_standard_target_table
-from retrieval_from_space.logging import setup_logger
-from retrieval_from_space.paths import RunPaths
-from retrieval_from_space.state import PipelineState
+from src.config import PipelineConfig
+from src.data.matchups import create_product_matchups, save_matchups
+from src.data.targets import load_target_table, save_standard_target_table
+from src.logging import setup_logger
+from src.paths import RunPaths
+from src.state import PipelineState
 
 
 def create_matchups(config: PipelineConfig, paths: RunPaths, state: PipelineState, overwrite: bool = False) -> dict[str, Path]:
-    logger = setup_logger("retrieval_from_space.matchups", paths.logs / "matchups.log")
+    logger = setup_logger("src.matchups", paths.logs / "matchups.log")
     state.mark("matchups", "running")
     targets = load_target_table(config.target)
     save_standard_target_table(targets, paths.processed / "targets.csv")

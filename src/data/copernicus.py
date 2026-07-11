@@ -5,7 +5,7 @@ from typing import Iterable
 
 import xarray as xr
 
-from retrieval_from_space.config import ProductSpec
+from src.config import ProductSpec
 
 
 def open_copernicus_dataset(product: ProductSpec) -> xr.Dataset:

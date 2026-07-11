@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from retrieval_from_space.config import PipelineConfig
-from retrieval_from_space.logging import setup_logger
-from retrieval_from_space.models.training import train_base_models, train_final_model, train_model
-from retrieval_from_space.paths import RunPaths
-from retrieval_from_space.state import PipelineState
+from src.config import PipelineConfig
+from src.logging import setup_logger
+from src.models.training import train_base_models, train_final_model, train_model
+from src.paths import RunPaths
+from src.state import PipelineState
 
 
 def train(
@@ -17,7 +17,7 @@ def train(
     stage: str = "all",
     base_names: list[str] | None = None,
 ) -> dict[str, Path]:
-    logger = setup_logger("retrieval_from_space.train", paths.logs / "train.log")
+    logger = setup_logger("src.train", paths.logs / "train.log")
     state_name = "train" if stage == "all" else f"train_{stage}"
     state.mark(state_name, "running")
     if stage == "all":

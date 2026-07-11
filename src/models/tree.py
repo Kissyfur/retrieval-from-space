@@ -13,18 +13,6 @@ def random_forest(problem_type: str, **params):
     return RandomForestRegressor(**params)
 
 
-def xgboost_model(problem_type: str, **params):
-    try:
-        import xgboost as xgb
-    except ImportError as exc:
-        raise ImportError("The xgboost model family requires xgboost.") from exc
-    if problem_type == "classification":
-        defaults = {"eval_metric": "mlogloss", "random_state": 42}
-        return xgb.XGBClassifier(**{**defaults, **params})
-    defaults = {"random_state": 42}
-    return xgb.XGBRegressor(**{**defaults, **params})
-
-
 def save_pickle_model(model, path: str | Path) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

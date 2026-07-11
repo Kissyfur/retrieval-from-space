@@ -7,9 +7,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from retrieval_from_space.examples.synthetic import create_synthetic_example
-from retrieval_from_space.pipeline.common import initialize_run
-from retrieval_from_space.pipeline.run import run_pipeline
+from src.examples.synthetic import create_synthetic_example
+from src.pipeline.common import initialize_run
+from src.pipeline.run import run_pipeline
 
 
 def _assert_outputs(run_root: Path) -> None:

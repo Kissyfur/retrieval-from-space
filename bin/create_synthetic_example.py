@@ -7,7 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from retrieval_from_space.examples.synthetic import create_synthetic_example
+from src.examples.synthetic import create_synthetic_example
 
 
 def main() -> None:

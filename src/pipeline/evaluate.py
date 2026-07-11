@@ -5,12 +5,12 @@ from pathlib import Path
 
 import pandas as pd
 
-from retrieval_from_space.config import PipelineConfig
-from retrieval_from_space.logging import setup_logger
-from retrieval_from_space.metrics.classification import classification_metrics, save_confusion_matrix_plot
-from retrieval_from_space.metrics.regression import regression_metrics
-from retrieval_from_space.paths import RunPaths
-from retrieval_from_space.state import PipelineState
+from src.config import PipelineConfig
+from src.logging import setup_logger
+from src.metrics.classification import classification_metrics, save_confusion_matrix_plot
+from src.metrics.regression import regression_metrics
+from src.paths import RunPaths
+from src.state import PipelineState
 
 
 def _compact_metric_line(metrics: dict) -> str:
@@ -46,7 +46,7 @@ def _stage_summary(stage_metrics_path: Path) -> str:
 
 
 def evaluate(config: PipelineConfig, paths: RunPaths, state: PipelineState) -> dict[str, Path]:
-    logger = setup_logger("retrieval_from_space.evaluate", paths.logs / "evaluate.log")
+    logger = setup_logger("src.evaluate", paths.logs / "evaluate.log")
     state.mark("evaluate", "running")
     predictions_path = paths.metrics / "predictions.csv"
     if not predictions_path.exists():
@@ -54,13 +54,8 @@ def evaluate(config: PipelineConfig, paths: RunPaths, state: PipelineState) -> d
     predictions = pd.read_csv(predictions_path)
     problem_type = config.problem.type or predictions["problem_type"].iloc[0]
     metrics_path = paths.metrics / "metrics.json"
-    existing_metrics = (
-        json.loads(metrics_path.read_text(encoding="utf-8")) if metrics_path.exists() else {}
-    )
     if problem_type == "classification":
         metrics = classification_metrics(predictions["y_true"], predictions["y_pred"])
-        if "decision_thresholds" in existing_metrics:
-            metrics["decision_thresholds"] = existing_metrics["decision_thresholds"]
         save_confusion_matrix_plot(
             predictions["y_true"],
             predictions["y_pred"],

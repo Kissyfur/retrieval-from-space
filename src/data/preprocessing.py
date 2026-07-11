@@ -10,10 +10,10 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-from retrieval_from_space.config import PipelineConfig, ProductSpec
-from retrieval_from_space.data.targets import TARGET, load_target_table, metadata_to_dataarray, target_to_dataarray
-from retrieval_from_space.features.masks import get_cloud_and_land_masks, valid_water_coverage
-from retrieval_from_space.features.transforms import interpolate_dataset, positive_quantile
+from src.config import PipelineConfig, ProductSpec
+from src.data.targets import TARGET, load_target_table, metadata_to_dataarray, target_to_dataarray
+from src.features.masks import get_cloud_and_land_masks, valid_water_coverage
+from src.features.transforms import interpolate_dataset, positive_quantile
 
 VARIABLE = "variable"
 ORDERED_CUBE_DIMS = ("Id", "lat", "lon", "time", VARIABLE)

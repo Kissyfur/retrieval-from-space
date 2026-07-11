@@ -10,21 +10,15 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 from sklearn.metrics import get_scorer
-from sklearn.model_selection import (
-    KFold,
-    RepeatedKFold,
-    RepeatedStratifiedKFold,
-    StratifiedKFold,
-    train_test_split,
-)
+from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from tqdm.auto import tqdm
 
-from retrieval_from_space.config import ModelConfig, ModelStageConfig, PipelineConfig
-from retrieval_from_space.metrics.classification import classification_metrics, save_confusion_matrix_plot
-from retrieval_from_space.metrics.regression import regression_metrics
-from retrieval_from_space.models.factory import create_model
-from retrieval_from_space.models.tree import save_pickle_model
+from src.config import ModelConfig, ModelStageConfig, PipelineConfig
+from src.metrics.classification import classification_metrics, save_confusion_matrix_plot
+from src.metrics.regression import regression_metrics
+from src.models.factory import create_model
+from src.models.tree import save_pickle_model
 
 
 def interval_labeling(values: np.ndarray, intervals: list[list[float]]) -> np.ndarray:
@@ -112,16 +106,8 @@ class ArrayStandardizer:
         return self.fit(x).transform(x)
 
 
-def _effective_family(stage: ModelStageConfig | ModelConfig, params: dict[str, Any] | None = None) -> str:
-    params = {} if params is None else params
-    return str(params.get("family", params.get("model_family", stage.family))).lower()
-
-
-def _stage_uses_cnn3d(
-    stage: ModelStageConfig | ModelConfig,
-    params: dict[str, Any] | None = None,
-) -> bool:
-    return _effective_family(stage, params) in {"cnn3d", "3d_cnn"}
+def _stage_uses_cnn3d(stage: ModelStageConfig | ModelConfig) -> bool:
+    return stage.family.lower() in {"cnn3d", "3d_cnn"}
 
 
 def _stage_slug(name: str) -> str:
@@ -137,8 +123,6 @@ def _default_base_stage(config: ModelConfig) -> ModelStageConfig:
         standardize=config.standardize,
         sample_weight=config.sample_weight,
         augmentation=dict(config.augmentation),
-        decision_thresholds=dict(config.decision_thresholds),
-        input_selection=dict(config.input_selection),
         hyperparameter_search=config.hyperparameter_search,
     )
 
@@ -266,18 +250,9 @@ def _default_scoring(problem_type: str) -> str:
     return "f1_macro" if problem_type == "classification" else "r2"
 
 
-def _splitter(problem_type: str, cv: int, random_state: int, repeats: int = 1):
-    repeats = max(1, int(repeats))
+def _splitter(problem_type: str, cv: int, random_state: int):
     if problem_type == "classification":
-        if repeats > 1:
-            return RepeatedStratifiedKFold(
-                n_splits=cv,
-                n_repeats=repeats,
-                random_state=random_state,
-            )
         return StratifiedKFold(n_splits=cv, shuffle=True, random_state=random_state)
-    if repeats > 1:
-        return RepeatedKFold(n_splits=cv, n_repeats=repeats, random_state=random_state)
     return KFold(n_splits=cv, shuffle=True, random_state=random_state)
 
 
@@ -292,13 +267,12 @@ def _validate_target_compatibility(
     problem_type: str,
     stage: ModelStageConfig,
     y: np.ndarray,
-    params: dict[str, Any] | None = None,
 ) -> None:
     if problem_type != "classification":
         return
     if np.asarray(y).ndim <= 1:
         return
-    family = _effective_family(stage, params)
+    family = stage.family.lower()
     if family not in {"cnn", "cnn1d", "1d_cnn", "cnn3d", "3d_cnn"}:
         raise ValueError(
             "Probability-vector classification targets require a model family that accepts "
@@ -478,7 +452,7 @@ def _fit_estimator(
     random_state: int = 42,
     progress_description: str | None = None,
 ):
-    _validate_target_compatibility(problem_type, stage, y, params)
+    _validate_target_compatibility(problem_type, stage, y)
     x_proc, scaler = _fit_scaler_if_needed(x, stage)
     sample_weight, sample_weight_info = _make_sample_weights(problem_type, stage, y_labels)
     x_fit, y_fit, labels_fit, sample_weight_fit, augmentation_info = _augment_training_data(
@@ -540,7 +514,7 @@ def _select_params(
         return candidates[0], []
 
     scorer = get_scorer(search.scoring or _default_scoring(problem_type))
-    splitter = _splitter(problem_type, search.cv, random_state, repeats=search.repeats)
+    splitter = _splitter(problem_type, search.cv, random_state)
     split_y = y if split_labels is None else split_labels
     score_y = y if score_labels is None else score_labels
     cv_results = []
@@ -580,7 +554,6 @@ def _select_params(
                 "candidate_index": index,
                 "params": params,
                 "cv": int(search.cv),
-                "repeats": int(search.repeats),
                 "scores": scores,
                 "mean_score": mean_score,
                 "std_score": std_score,
@@ -647,254 +620,8 @@ def _metric_target(problem_type: str, y_target: np.ndarray, y_labels: np.ndarray
     return y_labels if problem_type == "classification" else y_target
 
 
-def _threshold_settings(stage: ModelStageConfig) -> dict[str, Any]:
-    raw = dict(stage.decision_thresholds or {})
-    if not raw or not bool(raw.get("enabled", False)):
-        return {"enabled": False}
-    return {
-        "enabled": True,
-        "tune": bool(raw.get("tune", raw.get("search", True))),
-        "target_class": raw.get("target_class", raw.get("class")),
-        "threshold": raw.get("threshold"),
-        "grid": raw.get("grid", raw.get("thresholds")),
-        "scoring": str(raw.get("scoring", "f1_macro")),
-        "tie_tolerance": float(raw.get("tie_tolerance", raw.get("score_tolerance", 0.0))),
-        "tie_breaker": str(raw.get("tie_breaker", "score")).lower(),
-        "target_rate_penalty": float(raw.get("target_rate_penalty", 0.0)),
-        "target_rate_multiplier": raw.get("target_rate_multiplier"),
-        "target_rate_tolerance": raw.get("target_rate_tolerance"),
-        "max_target_prediction_rate": raw.get("max_target_prediction_rate"),
-    }
-
-
-def _resolve_threshold_target_class(target_class, label_values, signal: np.ndarray) -> int:
-    n_classes = int(np.asarray(signal).shape[1])
-    if target_class is None:
-        if label_values:
-            return int(label_values[-1])
-        return n_classes - 1
-    target_index = int(target_class)
-    if target_index < 0:
-        target_index = n_classes + target_index
-    if target_index < 0 or target_index >= n_classes:
-        raise ValueError(
-            f"decision_thresholds.target_class must be within 0..{n_classes - 1}; got {target_class}."
-        )
-    return target_index
-
-
-def _threshold_grid(settings: dict[str, Any]) -> list[float]:
-    if settings.get("threshold") is not None and not settings.get("tune", True):
-        return [float(settings["threshold"])]
-    raw_grid = settings.get("grid")
-    if raw_grid is None:
-        raw_grid = [0.2, 0.3, 0.4, 0.5, 0.6]
-    grid = [float(value) for value in raw_grid]
-    if settings.get("threshold") is not None:
-        grid.append(float(settings["threshold"]))
-    unique = sorted({round(value, 10) for value in grid if 0.0 <= value <= 1.0})
-    if not unique:
-        raise ValueError("decision_thresholds.grid must contain at least one value between 0 and 1.")
-    return unique
-
-
-def _apply_target_class_threshold(
-    signal: np.ndarray,
-    target_class: int,
-    threshold: float,
-) -> np.ndarray:
-    probabilities = np.asarray(signal)
-    if probabilities.ndim != 2 or probabilities.shape[1] <= 1:
-        return _classification_labels(probabilities)
-    target_class = int(target_class)
-    fallback = probabilities.copy()
-    fallback[:, target_class] = -np.inf
-    y_pred = np.argmax(fallback, axis=1)
-    y_pred[probabilities[:, target_class] >= float(threshold)] = target_class
-    return y_pred
-
-
-def _classification_prediction_from_signal(
-    signal: np.ndarray,
-    decision_threshold_report: dict[str, Any] | None = None,
-) -> np.ndarray:
-    if decision_threshold_report and decision_threshold_report.get("enabled"):
-        return _apply_target_class_threshold(
-            signal,
-            int(decision_threshold_report["target_class"]),
-            float(decision_threshold_report["selected_threshold"]),
-        )
+def _classification_prediction_from_signal(signal: np.ndarray) -> np.ndarray:
     return _classification_labels(signal)
-
-
-def _score_threshold_candidate(
-    y_true: np.ndarray,
-    y_pred: np.ndarray,
-    label_values,
-    scoring: str,
-) -> tuple[float, dict[str, Any]]:
-    metrics = classification_metrics(y_true, y_pred, labels=label_values)
-    if scoring not in metrics:
-        available = ", ".join(sorted(metrics))
-        raise ValueError(f"Unsupported decision threshold scoring '{scoring}'. Available: {available}.")
-    return float(metrics[scoring]), metrics
-
-
-def _class_metric_from_confusion_matrix(metrics: dict[str, Any], target_class: int) -> dict[str, float]:
-    matrix = np.asarray(metrics.get("confusion_matrix", []), dtype=float)
-    if matrix.ndim != 2 or target_class < 0 or target_class >= matrix.shape[0]:
-        return {
-            "target_class_precision": 0.0,
-            "target_class_recall": 0.0,
-            "target_class_f1": 0.0,
-        }
-    true_positive = matrix[target_class, target_class]
-    predicted = matrix[:, target_class].sum()
-    actual = matrix[target_class, :].sum()
-    precision = float(true_positive / predicted) if predicted else 0.0
-    recall = float(true_positive / actual) if actual else 0.0
-    f1 = float(2 * precision * recall / (precision + recall)) if precision + recall else 0.0
-    return {
-        "target_class_precision": precision,
-        "target_class_recall": recall,
-        "target_class_f1": f1,
-    }
-
-
-def _select_threshold_candidate(candidates: list[dict[str, Any]], settings: dict[str, Any]) -> dict[str, Any]:
-    score_key = "selection_score"
-    best_score = max(row.get(score_key, row["score"]) for row in candidates)
-    tolerance = max(float(settings.get("tie_tolerance", 0.0)), 0.0)
-    contenders = [row for row in candidates if row.get(score_key, row["score"]) >= best_score - tolerance]
-    tie_breaker = str(settings.get("tie_breaker", "score")).lower()
-    if tie_breaker in {"target_recall", "target_class_recall", "recall"}:
-        return max(
-            contenders,
-            key=lambda row: (
-                row.get("target_class_recall", 0.0),
-                row.get(score_key, row["score"]),
-                row["score"],
-                -row["threshold"],
-            ),
-        )
-    if tie_breaker in {"target_f1", "target_class_f1"}:
-        return max(
-            contenders,
-            key=lambda row: (
-                row.get("target_class_f1", 0.0),
-                row.get(score_key, row["score"]),
-                row["score"],
-                -row["threshold"],
-            ),
-        )
-    if tie_breaker in {"lower_threshold", "lower"}:
-        return min(contenders, key=lambda row: (row["threshold"], -row.get(score_key, row["score"])))
-    if tie_breaker in {"higher_threshold", "higher"}:
-        return max(contenders, key=lambda row: (row["threshold"], row.get(score_key, row["score"])))
-    return max(contenders, key=lambda row: (row.get(score_key, row["score"]), row["score"], -row["threshold"]))
-
-
-def _target_prediction_rate_limit(settings: dict[str, Any], target_actual_rate: float) -> float | None:
-    if settings.get("max_target_prediction_rate") is not None:
-        return float(settings["max_target_prediction_rate"])
-    multiplier = settings.get("target_rate_multiplier")
-    tolerance = settings.get("target_rate_tolerance")
-    if multiplier is None and tolerance is None:
-        return target_actual_rate if float(settings.get("target_rate_penalty", 0.0)) > 0 else None
-    limit = target_actual_rate
-    if multiplier is not None:
-        limit = target_actual_rate * float(multiplier)
-    if tolerance is not None:
-        limit += float(tolerance)
-    return max(0.0, min(1.0, float(limit)))
-
-
-def _target_rate_penalty_payload(
-    y_true: np.ndarray,
-    y_pred: np.ndarray,
-    target_class: int,
-    settings: dict[str, Any],
-) -> dict[str, float | None]:
-    target_actual_rate = float(np.mean(np.asarray(y_true).reshape(-1) == target_class))
-    target_prediction_rate = float(np.mean(np.asarray(y_pred).reshape(-1) == target_class))
-    limit = _target_prediction_rate_limit(settings, target_actual_rate)
-    penalty_weight = max(float(settings.get("target_rate_penalty", 0.0)), 0.0)
-    excess = max(0.0, target_prediction_rate - limit) if limit is not None else 0.0
-    penalty = penalty_weight * excess
-    return {
-        "target_actual_rate": target_actual_rate,
-        "target_prediction_rate": target_prediction_rate,
-        "target_prediction_rate_limit": limit,
-        "target_prediction_rate_excess": excess,
-        "target_rate_penalty_weight": penalty_weight,
-        "target_rate_penalty": penalty,
-    }
-
-
-def _tune_decision_threshold(
-    stage: ModelStageConfig,
-    train_signal: np.ndarray,
-    y_train_labels: np.ndarray,
-    label_values,
-) -> dict[str, Any] | None:
-    settings = _threshold_settings(stage)
-    if not settings["enabled"]:
-        return None
-    train_signal = np.asarray(train_signal)
-    if train_signal.ndim != 2 or train_signal.shape[1] <= 1:
-        return {
-            "enabled": False,
-            "reason": "Decision thresholds require class probability columns.",
-        }
-
-    target_class = _resolve_threshold_target_class(settings.get("target_class"), label_values, train_signal)
-    scoring = settings["scoring"]
-    candidates = []
-    for threshold in _threshold_grid(settings):
-        y_pred = _apply_target_class_threshold(train_signal, target_class, threshold)
-        score, metrics = _score_threshold_candidate(y_train_labels, y_pred, label_values, scoring)
-        target_metrics = _class_metric_from_confusion_matrix(metrics, target_class)
-        rate_payload = _target_rate_penalty_payload(y_train_labels, y_pred, target_class, settings)
-        selection_score = score - float(rate_payload["target_rate_penalty"])
-        candidates.append(
-            {
-                "threshold": float(threshold),
-                "score": score,
-                "selection_score": selection_score,
-                "metrics": metrics,
-                **target_metrics,
-                **rate_payload,
-                "predicted_distribution": _class_distribution(y_pred),
-            }
-        )
-    best_score = max(row["score"] for row in candidates)
-    best_selection_score = max(row["selection_score"] for row in candidates)
-    best = _select_threshold_candidate(candidates, settings)
-    return {
-        "enabled": True,
-        "tuned": bool(settings.get("tune", True)),
-        "target_class": int(target_class),
-        "selected_threshold": float(best["threshold"]),
-        "scoring": scoring,
-        "selected_score": float(best["score"]),
-        "selected_selection_score": float(best["selection_score"]),
-        "primary_best_score": float(best_score),
-        "selection_best_score": float(best_selection_score),
-        "tie_tolerance": float(settings.get("tie_tolerance", 0.0)),
-        "tie_breaker": settings.get("tie_breaker", "score"),
-        "selected_target_class_recall": float(best.get("target_class_recall", 0.0)),
-        "selected_target_class_f1": float(best.get("target_class_f1", 0.0)),
-        "target_rate_penalty": {
-            "weight": float(settings.get("target_rate_penalty", 0.0)),
-            "multiplier": settings.get("target_rate_multiplier"),
-            "tolerance": settings.get("target_rate_tolerance"),
-            "max_prediction_rate": settings.get("max_target_prediction_rate"),
-            "selected_target_prediction_rate": best.get("target_prediction_rate"),
-            "selected_target_prediction_rate_limit": best.get("target_prediction_rate_limit"),
-            "selected_penalty": best.get("target_rate_penalty"),
-        },
-        "candidates": candidates,
-    }
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> Path:
@@ -1144,7 +871,7 @@ def _train_direct(
     direct_report = {
         "stage": "direct",
         "name": "direct",
-        "family": _effective_family(stage, selected_params),
+        "family": stage.family,
         "feature_groups": group_names,
         "selected_params": selected_params,
         "cv_results": cv_results,
@@ -1257,7 +984,7 @@ def _fit_base_stage(
     base_report = {
         "stage": "base",
         "name": base_name,
-        "family": _effective_family(base_stage, base_params),
+        "family": base_stage.family,
         "feature_groups": base_groups,
         "selected_params": base_params,
         "cv_results": base_cv_results,
@@ -1516,38 +1243,15 @@ def _metadata_feature_columns(datasets_dir: Path, group_names: list[str], fallba
     return [f"meta_{idx}" for idx in range(fallback_width)]
 
 
-def _input_selection_settings(stage: ModelStageConfig, problem_type: str) -> dict[str, Any]:
-    raw = dict(stage.input_selection or {})
-    if not raw or not bool(raw.get("enabled", False)):
-        return {"enabled": False}
-    return {
-        "enabled": True,
-        "scoring": str(raw.get("scoring", _default_scoring(problem_type))),
-        "cv": raw.get("cv"),
-        "candidates": raw.get("candidates", raw.get("variants")),
-        "tie_tolerance": float(raw.get("tie_tolerance", raw.get("score_tolerance", 0.0))),
-        "tie_breaker": str(raw.get("tie_breaker", "score")).lower(),
-        "preferred_variants": [str(name) for name in raw.get("preferred_variants", [])],
-    }
-
-
-def _final_feature_variants(
+def _stack_final_features(
     x_meta_train: np.ndarray,
     x_meta_test: np.ndarray,
     meta_columns: list[str],
     base_train_signals: list[tuple[str, np.ndarray]],
     base_test_signals: list[tuple[str, np.ndarray]],
-) -> list[dict[str, Any]]:
-    variants: list[dict[str, Any]] = [
-        {
-            "name": "metadata_only",
-            "x_train": x_meta_train,
-            "x_test": x_meta_test,
-            "feature_columns": meta_columns,
-        }
-    ]
+) -> tuple[np.ndarray, np.ndarray, list[str], list[str]]:
     if not base_train_signals:
-        return variants
+        return x_meta_train, x_meta_test, meta_columns, []
 
     base_train_all = np.hstack([signal for _, signal in base_train_signals])
     base_test_all = np.hstack([signal for _, signal in base_test_signals])
@@ -1556,342 +1260,11 @@ def _final_feature_variants(
         for base_name, signal in base_train_signals
         for column in _base_signal_columns(base_name, signal)
     ]
-    variants.append(
-        {
-            "name": "base_signals_only",
-            "x_train": base_train_all,
-            "x_test": base_test_all,
-            "feature_columns": base_columns,
-        }
-    )
-    variants.append(
-        {
-            "name": "all_signals_plus_metadata",
-            "x_train": np.hstack([base_train_all, x_meta_train]),
-            "x_test": np.hstack([base_test_all, x_meta_test]),
-            "feature_columns": base_columns + meta_columns,
-        }
-    )
-    for (base_name, train_signal), (_, test_signal) in zip(base_train_signals, base_test_signals):
-        signal_columns = _base_signal_columns(base_name, train_signal)
-        slug = _stage_slug(base_name)
-        variants.append(
-            {
-                "name": f"{slug}_signal_only",
-                "x_train": train_signal,
-                "x_test": test_signal,
-                "feature_columns": signal_columns,
-            }
-        )
-        variants.append(
-            {
-                "name": f"{slug}_signal_plus_metadata",
-                "x_train": np.hstack([train_signal, x_meta_train]),
-                "x_test": np.hstack([test_signal, x_meta_test]),
-                "feature_columns": signal_columns + meta_columns,
-            }
-        )
-    return variants
-
-
-def _default_final_variant_name(include_base_prediction: bool, variants: list[dict[str, Any]]) -> str:
-    names = {variant["name"] for variant in variants}
-    if include_base_prediction and "all_signals_plus_metadata" in names:
-        return "all_signals_plus_metadata"
-    return "metadata_only"
-
-
-def _filter_final_input_variants(
-    variants: list[dict[str, Any]],
-    requested: Any,
-) -> list[dict[str, Any]]:
-    if not requested:
-        return variants
-    requested_names = [str(name) for name in requested]
-    by_name = {variant["name"]: variant for variant in variants}
-    missing = [name for name in requested_names if name not in by_name]
-    if missing:
-        raise ValueError(f"Unknown final input selection candidate(s): {missing}. Available: {list(by_name)}")
-    return [by_name[name] for name in requested_names]
-
-
-def _score_from_metrics(metrics: dict[str, Any], scoring: str) -> float:
-    if scoring not in metrics:
-        available = ", ".join(sorted(metrics))
-        raise ValueError(f"Unsupported scoring '{scoring}'. Available: {available}.")
-    return float(metrics[scoring])
-
-
-def _input_selection_sort_key(row: dict[str, Any], settings: dict[str, Any]):
-    tie_breaker = str(settings.get("tie_breaker", "score")).lower()
-    if tie_breaker in {"target_recall", "target_class_recall", "recall"}:
-        return (row.get("target_class_recall", 0.0), row["score"], -row["feature_count"])
-    if tie_breaker in {"target_f1", "target_class_f1"}:
-        return (row.get("target_class_f1", 0.0), row["score"], -row["feature_count"])
-    if tie_breaker in {"simpler", "fewest_features", "feature_count"}:
-        return (-row["feature_count"], row["score"])
-    return (row["score"], -row["feature_count"])
-
-
-def _select_input_selection_row(
-    rows: list[dict[str, Any]],
-    settings: dict[str, Any],
-) -> dict[str, Any]:
-    best_score = max(row["score"] for row in rows)
-    tolerance = max(float(settings.get("tie_tolerance", 0.0)), 0.0)
-    contenders = [row for row in rows if row["score"] >= best_score - tolerance]
-    tie_breaker = str(settings.get("tie_breaker", "score")).lower()
-    if tie_breaker in {"preferred", "preferred_variant", "preferred_variants", "priority"}:
-        by_name = {row["name"]: row for row in contenders}
-        for name in settings.get("preferred_variants", []):
-            if name in by_name:
-                return by_name[name]
-    return max(contenders, key=lambda row: _input_selection_sort_key(row, settings))
-
-
-def _evaluate_final_variant_oof(
-    config: PipelineConfig,
-    problem_type: str,
-    final_problem_type: str,
-    final_stage: ModelStageConfig,
-    final_y_train: np.ndarray,
-    y_train_labels: np.ndarray,
-    train_metric_target: np.ndarray,
-    label_values,
-    variant: dict[str, Any],
-    settings: dict[str, Any],
-) -> dict[str, Any]:
-    selected_params, cv_results = _select_params(
-        final_problem_type,
-        final_stage,
-        variant["x_train"],
-        final_y_train,
-        config.problem.random_state,
-        split_labels=y_train_labels if final_problem_type == "classification" else None,
-        score_labels=y_train_labels if final_problem_type == "classification" else None,
-        stage_name=f"final:{variant['name']}",
-    )
-    configured_cv = settings.get("cv")
-    oof_cv = int(configured_cv) if configured_cv else max(
-        2,
-        final_stage.hyperparameter_search.cv if final_stage.hyperparameter_search.enabled else 5,
-    )
-    oof_signal = _out_of_fold_signal(
-        final_problem_type,
-        final_stage,
-        variant["x_train"],
-        final_y_train,
-        selected_params,
-        config.problem.random_state,
-        oof_cv,
-        split_labels=y_train_labels if final_problem_type == "classification" else None,
-        stage_name=f"final:{variant['name']}",
-    )
-    decision_threshold_report = None
-    if final_problem_type == "classification":
-        decision_threshold_report = _tune_decision_threshold(
-            final_stage,
-            oof_signal,
-            y_train_labels,
-            label_values,
-        )
-        oof_pred = _classification_prediction_from_signal(oof_signal, decision_threshold_report)
-    else:
-        oof_pred = _prediction_labels(final_problem_type, oof_signal)
-    metrics = _evaluate(problem_type, train_metric_target, oof_pred, label_values)
-    score = _score_from_metrics(metrics, settings["scoring"])
-    target_metrics = {}
-    if final_problem_type == "classification":
-        target_class = (
-            decision_threshold_report["target_class"]
-            if decision_threshold_report and decision_threshold_report.get("enabled")
-            else (label_values[-1] if label_values else np.asarray(oof_signal).shape[1] - 1)
-        )
-        target_metrics = _class_metric_from_confusion_matrix(metrics, int(target_class))
-    return {
-        "name": variant["name"],
-        "feature_count": int(variant["x_train"].shape[1]),
-        "feature_columns": variant["feature_columns"],
-        "selected_params": selected_params,
-        "cv_results": cv_results,
-        "oof_cv": oof_cv,
-        "oof_metrics": metrics,
-        "score": score,
-        "decision_thresholds": decision_threshold_report,
-        **target_metrics,
-    }
-
-
-def _select_final_input_variant(
-    config: PipelineConfig,
-    problem_type: str,
-    final_problem_type: str,
-    final_stage: ModelStageConfig,
-    variants: list[dict[str, Any]],
-    final_y_train: np.ndarray,
-    y_train_labels: np.ndarray,
-    train_metric_target: np.ndarray,
-    label_values,
-) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any] | None]:
-    settings = _input_selection_settings(final_stage, problem_type)
-    by_name = {variant["name"]: variant for variant in variants}
-    if not settings["enabled"] or config.model.strategy != "stacking":
-        selected_name = _default_final_variant_name(config.model.include_base_prediction, variants)
-        return by_name[selected_name], None, None
-
-    candidate_variants = _filter_final_input_variants(variants, settings.get("candidates"))
-    rows = []
-    for variant in tqdm(candidate_variants, desc="Final input variants", unit="variant"):
-        rows.append(
-            _evaluate_final_variant_oof(
-                config,
-                problem_type,
-                final_problem_type,
-                final_stage,
-                final_y_train,
-                y_train_labels,
-                train_metric_target,
-                label_values,
-                variant,
-                settings,
-            )
-        )
-    selected = _select_input_selection_row(rows, settings)
-    report = {
-        "enabled": True,
-        "scoring": settings["scoring"],
-        "tie_tolerance": settings["tie_tolerance"],
-        "tie_breaker": settings["tie_breaker"],
-        "preferred_variants": settings.get("preferred_variants", []),
-        "hyperparameter_search": {
-            "enabled": bool(final_stage.hyperparameter_search.enabled),
-            "cv": int(final_stage.hyperparameter_search.cv),
-            "repeats": int(final_stage.hyperparameter_search.repeats),
-            "candidate_count": len(_candidate_pool(final_stage)),
-        },
-        "selected_variant": selected["name"],
-        "selected_score": float(selected["score"]),
-        "selected_params": selected["selected_params"],
-        "decision_thresholds": selected.get("decision_thresholds"),
-        "candidates": rows,
-    }
-    return by_name[selected["name"]], report, selected
-
-
-def _final_variant_metrics(
-    config: PipelineConfig,
-    problem_type: str,
-    final_problem_type: str,
-    final_stage: ModelStageConfig,
-    final_y_train: np.ndarray,
-    y_train_labels: np.ndarray,
-    train_metric_target: np.ndarray,
-    test_metric_target: np.ndarray,
-    label_values,
-    final_params: dict[str, Any],
-    decision_threshold_report: dict[str, Any] | None,
-    variant: dict[str, Any],
-) -> dict[str, Any]:
-    model, scaler = _fit_estimator(
-        final_problem_type,
-        final_stage,
-        variant["x_train"],
-        final_y_train,
-        final_params,
-        y_labels=y_train_labels if final_problem_type == "classification" else None,
-        random_state=config.problem.random_state,
-        progress_description=f"final ablation {variant['name']}",
-    )
-    x_train_proc = _transform_with_scaler(variant["x_train"], scaler)
-    x_test_proc = _transform_with_scaler(variant["x_test"], scaler)
-    if final_problem_type == "classification":
-        train_signal = _predict_signal(problem_type, model, x_train_proc)
-        test_signal = _predict_signal(problem_type, model, x_test_proc)
-        train_pred = _classification_prediction_from_signal(train_signal, decision_threshold_report)
-        test_pred = _classification_prediction_from_signal(test_signal, decision_threshold_report)
-        argmax_test_pred = _classification_labels(test_signal)
-        payload = {
-            "name": variant["name"],
-            "feature_count": int(variant["x_train"].shape[1]),
-            "feature_columns": variant["feature_columns"],
-            "train_metrics": _evaluate(problem_type, train_metric_target, train_pred, label_values),
-            "test_metrics": _evaluate(problem_type, test_metric_target, test_pred, label_values),
-            "test_metrics_argmax": _evaluate(problem_type, test_metric_target, argmax_test_pred, label_values),
-        }
-    else:
-        train_pred = model.predict(x_train_proc)
-        test_pred = model.predict(x_test_proc)
-        payload = {
-            "name": variant["name"],
-            "feature_count": int(variant["x_train"].shape[1]),
-            "feature_columns": variant["feature_columns"],
-            "train_metrics": _evaluate(problem_type, train_metric_target, train_pred, label_values),
-            "test_metrics": _evaluate(problem_type, test_metric_target, test_pred, label_values),
-        }
-    training = _training_info(model)
-    if training:
-        payload["training"] = training
-    return payload
-
-
-def _save_final_ablation_report(
-    config: PipelineConfig,
-    problem_type: str,
-    final_problem_type: str,
-    final_stage: ModelStageConfig,
-    paths: dict[str, Path],
-    x_final_train_meta: np.ndarray,
-    x_final_test_meta: np.ndarray,
-    final_groups: list[str],
-    base_train_signals: list[tuple[str, np.ndarray]],
-    base_test_signals: list[tuple[str, np.ndarray]],
-    final_y_train: np.ndarray,
-    y_train_labels: np.ndarray,
-    train_metric_target: np.ndarray,
-    test_metric_target: np.ndarray,
-    label_values,
-    final_params: dict[str, Any],
-    decision_threshold_report: dict[str, Any] | None,
-) -> Path | None:
-    if config.model.strategy != "stacking":
-        return None
-    meta_columns = _metadata_feature_columns(paths["datasets"], final_groups, x_final_train_meta.shape[1])
-    variants = _final_feature_variants(
-        x_final_train_meta,
-        x_final_test_meta,
-        meta_columns,
-        base_train_signals,
-        base_test_signals,
-    )
-    reports = []
-    for variant in tqdm(variants, desc="Final ablation variants", unit="variant"):
-        reports.append(
-            _final_variant_metrics(
-                config,
-                problem_type,
-                final_problem_type,
-                final_stage,
-                final_y_train,
-                y_train_labels,
-                train_metric_target,
-                test_metric_target,
-                label_values,
-                final_params,
-                decision_threshold_report,
-                variant,
-            )
-        )
-    return _write_json(
-        paths["metrics"] / "final_ablation_metrics.json",
-        {
-            "stage": "final_ablation",
-            "strategy": config.model.strategy,
-            "problem_type": problem_type,
-            "selected_params": final_params,
-            "decision_thresholds_applied": decision_threshold_report,
-            "notes": "Ablation train metrics are in-sample diagnostics; use test metrics for comparison.",
-            "variants": reports,
-        },
+    return (
+        np.hstack([base_train_all, x_meta_train]),
+        np.hstack([base_test_all, x_meta_test]),
+        base_columns + meta_columns,
+        base_columns,
     )
 
 
@@ -1934,68 +1307,42 @@ def _train_final_from_base_signals(
     train_metric_target = _metric_target(problem_type, y_train, y_train_labels)
     test_metric_target = _metric_target(problem_type, y_test_target, y_test_labels)
     meta_columns = _metadata_feature_columns(paths["datasets"], final_groups, x_final_train_meta.shape[1])
-    final_variants = _final_feature_variants(
+    x_final_train, x_final_test, final_feature_columns, base_prediction_columns = _stack_final_features(
         x_final_train_meta,
         x_final_test_meta,
         meta_columns,
         base_train_signals,
         base_test_signals,
     )
-    selected_variant, input_selection_report, selected_input_row = _select_final_input_variant(
-        config,
-        problem_type,
+    input_variant = "all_base_oof_signals_plus_metadata" if base_train_signals else "metadata_only"
+
+    final_params, final_cv_results = _select_params(
         final_problem_type,
         final_stage,
-        final_variants,
+        x_final_train,
         final_y_train,
-        y_train_labels,
-        train_metric_target,
-        label_values,
+        config.problem.random_state,
+        split_labels=y_train_labels if final_problem_type == "classification" else None,
+        score_labels=y_train_labels if final_problem_type == "classification" else None,
+        stage_name="final",
     )
-    x_final_train = selected_variant["x_train"]
-    x_final_test = selected_variant["x_test"]
-
-    final_oof_signal = None
-    decision_threshold_report = None
-    final_oof_metrics = None
-    if selected_input_row:
-        final_params = selected_input_row["selected_params"]
-        final_cv_results = selected_input_row["cv_results"]
-        decision_threshold_report = selected_input_row.get("decision_thresholds")
-        final_oof_metrics = selected_input_row.get("oof_metrics")
+    final_oof_cv = max(2, final_stage.hyperparameter_search.cv if final_stage.hyperparameter_search.enabled else 5)
+    final_oof_signal = _out_of_fold_signal(
+        final_problem_type,
+        final_stage,
+        x_final_train,
+        final_y_train,
+        final_params,
+        config.problem.random_state,
+        final_oof_cv,
+        split_labels=y_train_labels if final_problem_type == "classification" else None,
+        stage_name="final",
+    )
+    if strategy == "residual_correction":
+        final_oof_pred = base_train_signals[0][1].reshape(-1) + final_oof_signal.reshape(-1)
     else:
-        final_params, final_cv_results = _select_params(
-            final_problem_type,
-            final_stage,
-            x_final_train,
-            final_y_train,
-            config.problem.random_state,
-            split_labels=y_train_labels if final_problem_type == "classification" else None,
-            score_labels=y_train_labels if final_problem_type == "classification" else None,
-            stage_name="final",
-        )
-        if final_problem_type == "classification" and _threshold_settings(final_stage)["enabled"]:
-            final_oof_cv = max(
-                2,
-                final_stage.hyperparameter_search.cv if final_stage.hyperparameter_search.enabled else 5,
-            )
-            final_oof_signal = _out_of_fold_signal(
-                final_problem_type,
-                final_stage,
-                x_final_train,
-                final_y_train,
-                final_params,
-                config.problem.random_state,
-                final_oof_cv,
-                split_labels=y_train_labels,
-                stage_name="final threshold",
-            )
-            decision_threshold_report = _tune_decision_threshold(
-                final_stage,
-                final_oof_signal,
-                y_train_labels,
-                label_values,
-            )
+        final_oof_pred = _prediction_labels(final_problem_type, final_oof_signal)
+    final_oof_metrics = _evaluate(problem_type, train_metric_target, final_oof_pred, label_values)
     final_model, final_scaler = _fit_estimator(
         final_problem_type,
         final_stage,
@@ -2013,7 +1360,7 @@ def _train_final_from_base_signals(
         y_pred = base_test_signals[0][1].reshape(-1) + final_raw_pred
     elif problem_type == "classification":
         final_signal = _predict_signal(problem_type, final_model, x_final_test_proc)
-        y_pred = _classification_prediction_from_signal(final_signal, decision_threshold_report)
+        y_pred = _classification_prediction_from_signal(final_signal)
     else:
         y_pred = final_raw_pred
 
@@ -2022,40 +1369,33 @@ def _train_final_from_base_signals(
         final_train_pred = base_train_signals[0][1].reshape(-1) + final_model.predict(x_final_train_proc)
     elif problem_type == "classification":
         final_train_signal = _predict_signal(problem_type, final_model, x_final_train_proc)
-        final_train_pred = _classification_prediction_from_signal(final_train_signal, decision_threshold_report)
+        final_train_pred = _classification_prediction_from_signal(final_train_signal)
     else:
         final_train_pred = final_model.predict(x_final_train_proc)
 
     metrics = _evaluate(problem_type, test_metric_target, y_pred, label_values)
     final_train_metrics = _evaluate(problem_type, train_metric_target, final_train_pred, label_values)
-    if final_oof_signal is not None:
-        final_oof_pred = _classification_prediction_from_signal(final_oof_signal, decision_threshold_report)
-        final_oof_metrics = _evaluate(problem_type, train_metric_target, final_oof_pred, label_values)
-    if decision_threshold_report:
-        metrics = {**metrics, "decision_thresholds": decision_threshold_report}
     split_distribution = (
         {"train": _class_distribution(y_train_labels), "test": _class_distribution(y_test_labels)}
         if problem_type == "classification"
         else None
     )
+    for stale_name in ["final_input_selection_metrics.json", "final_ablation_metrics.json"]:
+        stale_path = paths["metrics"] / stale_name
+        if stale_path.exists():
+            stale_path.unlink()
+
     artifacts: dict[str, Path] = {}
     artifacts.update(
         {f"final_{key}": value for key, value in _save_stage_artifacts(
             paths["models"] / "final", final_model, final_scaler, final_params, final_cv_results
         ).items()}
     )
-    if input_selection_report:
-        artifacts["final_input_selection_metrics"] = _write_json(
-            paths["metrics"] / "final_input_selection_metrics.json",
-            input_selection_report,
-        )
     artifacts["model"] = artifacts["final_model"]
-    base_prediction_columns = []
     extra_prediction_columns = {}
     for base_name, base_test_signal in base_test_signals:
         column_name = f"base_{_stage_slug(base_name)}_signal"
         extra_prediction_columns[column_name] = base_test_signal
-        base_prediction_columns.extend(_base_signal_columns(base_name, base_test_signal))
     if problem_type == "classification" and strategy != "residual_correction":
         if final_signal is not None and final_signal.ndim > 1 and final_signal.shape[1] > 1:
             extra_prediction_columns["final_class_probability"] = final_signal
@@ -2064,11 +1404,11 @@ def _train_final_from_base_signals(
     final_report = {
         "stage": "final",
         "name": "final",
-        "family": _effective_family(final_stage, final_params),
+        "family": final_stage.family,
         "feature_groups": final_groups,
-        "input_variant": selected_variant["name"],
+        "input_variant": input_variant,
         "input_feature_count": int(x_final_train.shape[1]),
-        "input_feature_columns": selected_variant["feature_columns"],
+        "input_feature_columns": final_feature_columns,
         "base_prediction_columns": base_prediction_columns,
         "selected_params": final_params,
         "cv_results": final_cv_results,
@@ -2077,39 +1417,8 @@ def _train_final_from_base_signals(
         "test_metrics": metrics,
     }
     if final_oof_metrics is not None:
+        final_report["oof_cv"] = final_oof_cv
         final_report["train_oof_metrics"] = final_oof_metrics
-    if decision_threshold_report:
-        final_report["decision_thresholds"] = decision_threshold_report
-    if input_selection_report:
-        final_report["input_selection"] = {
-            "enabled": True,
-            "selected_variant": input_selection_report["selected_variant"],
-            "selected_score": input_selection_report["selected_score"],
-            "scoring": input_selection_report["scoring"],
-            "tie_tolerance": input_selection_report["tie_tolerance"],
-            "tie_breaker": input_selection_report["tie_breaker"],
-        }
-    ablation_path = _save_final_ablation_report(
-        config,
-        problem_type,
-        final_problem_type,
-        final_stage,
-        paths,
-        x_final_train_meta,
-        x_final_test_meta,
-        final_groups,
-        base_train_signals,
-        base_test_signals,
-        final_y_train,
-        y_train_labels,
-        train_metric_target,
-        test_metric_target,
-        label_values,
-        final_params,
-        decision_threshold_report,
-    )
-    if ablation_path is not None:
-        artifacts["final_ablation_metrics"] = ablation_path
     training_report = {
         "strategy": strategy,
         "problem_type": problem_type,
@@ -2123,14 +1432,12 @@ def _train_final_from_base_signals(
             for name, _ in base_train_signals
         },
         "final_model": {
-            "family": _effective_family(final_stage, final_params),
+            "family": final_stage.family,
             "feature_groups": final_groups,
-            "input_variant": selected_variant["name"],
+            "input_variant": input_variant,
             "input_feature_count": int(x_final_train.shape[1]),
-            "input_feature_columns": selected_variant["feature_columns"],
+            "input_feature_columns": final_feature_columns,
             "base_prediction_columns": base_prediction_columns,
-            "decision_thresholds": decision_threshold_report,
-            "input_selection": input_selection_report,
         },
         "stages": list(base_reports) + [final_report],
         "final_metrics": metrics,
@@ -2154,11 +1461,9 @@ def _train_final_from_base_signals(
                 "include_base_prediction": config.model.include_base_prediction,
                 "base_selected_params": base_param_payload,
                 "final_selected_params": final_params,
-                "final_input_variant": selected_variant["name"],
-                "final_input_feature_columns": selected_variant["feature_columns"],
-                "final_input_selection": input_selection_report,
+                "final_input_variant": input_variant,
+                "final_input_feature_columns": final_feature_columns,
                 "base_prediction_columns": base_prediction_columns,
-                "decision_thresholds": decision_threshold_report,
                 "class_distribution": split_distribution,
                 "class_encoding": config.problem.class_encoding,
             },

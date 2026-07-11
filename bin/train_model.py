@@ -7,8 +7,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from retrieval_from_space.pipeline.common import initialize_run
-from retrieval_from_space.pipeline.train import train
+from src.pipeline.common import initialize_run
+from src.pipeline.train import train
 
 
 def main() -> None:

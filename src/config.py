@@ -199,7 +199,6 @@ class ProblemConfig:
 class HyperparameterSearchConfig:
     enabled: bool = False
     cv: int = 3
-    repeats: int = 1
     scoring: str | None = None
     candidates: list[dict[str, Any]] = field(default_factory=list)
     param_grid: dict[str, list[Any]] = field(default_factory=dict)
@@ -210,7 +209,6 @@ class HyperparameterSearchConfig:
         return cls(
             enabled=bool(data.get("enabled", False)),
             cv=int(data.get("cv", 3)),
-            repeats=int(data.get("repeats", data.get("n_repeats", 1))),
             scoring=data.get("scoring"),
             candidates=[dict(v) for v in data.get("candidates", [])],
             param_grid=dict(data.get("param_grid", {})),
@@ -225,8 +223,6 @@ class ModelStageConfig:
     standardize: bool = False
     sample_weight: Any = None
     augmentation: dict[str, Any] = field(default_factory=dict)
-    decision_thresholds: dict[str, Any] = field(default_factory=dict)
-    input_selection: dict[str, Any] = field(default_factory=dict)
     hyperparameter_search: HyperparameterSearchConfig = field(default_factory=HyperparameterSearchConfig)
 
     @classmethod
@@ -239,8 +235,6 @@ class ModelStageConfig:
             standardize=bool(data.get("standardize", False)),
             sample_weight=data.get("sample_weight", data.get("make_sample_weight")),
             augmentation=dict(data.get("augmentation", {})),
-            decision_thresholds=dict(data.get("decision_thresholds", {})),
-            input_selection=dict(data.get("input_selection", {})),
             hyperparameter_search=HyperparameterSearchConfig.from_dict(data.get("hyperparameter_search")),
         )
 
@@ -281,8 +275,6 @@ class ModelConfig(ModelStageConfig):
             standardize=bool(data.get("standardize", False)),
             sample_weight=data.get("sample_weight", data.get("make_sample_weight")),
             augmentation=dict(data.get("augmentation", {})),
-            decision_thresholds=dict(data.get("decision_thresholds", {})),
-            input_selection=dict(data.get("input_selection", {})),
             hyperparameter_search=HyperparameterSearchConfig.from_dict(data.get("hyperparameter_search")),
             strategy=strategy,
             include_base_prediction=bool(data.get("include_base_prediction", True)),

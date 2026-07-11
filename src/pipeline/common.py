@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from retrieval_from_space import __version__
-from retrieval_from_space.config import PipelineConfig, load_config, write_config_snapshot
-from retrieval_from_space.paths import RunPaths, resolve_run_paths
-from retrieval_from_space.state import PipelineState
+from src import __version__
+from src.config import PipelineConfig, load_config, write_config_snapshot
+from src.paths import RunPaths, resolve_run_paths
+from src.state import PipelineState
 import json
 from datetime import datetime
 

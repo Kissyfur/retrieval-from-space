@@ -3,11 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from retrieval_from_space.config import PipelineConfig, ProductSpec
-from retrieval_from_space.data.copernicus import open_copernicus_dataset, rename_common_dimensions, save_dataset
-from retrieval_from_space.logging import setup_logger
-from retrieval_from_space.paths import RunPaths
-from retrieval_from_space.state import PipelineState
+from src.config import PipelineConfig, ProductSpec
+from src.data.copernicus import open_copernicus_dataset, rename_common_dimensions, save_dataset
+from src.logging import setup_logger
+from src.paths import RunPaths
+from src.state import PipelineState
 
 
 def _write_remote_product_marker(product: ProductSpec, path: Path, overwrite: bool) -> Path:
@@ -32,7 +32,7 @@ def _write_remote_product_marker(product: ProductSpec, path: Path, overwrite: bo
 
 
 def download_products(config: PipelineConfig, paths: RunPaths, state: PipelineState, overwrite: bool = False) -> dict[str, Path]:
-    logger = setup_logger("retrieval_from_space.download", paths.logs / "download.log")
+    logger = setup_logger("src.download", paths.logs / "download.log")
     artifacts: dict[str, Path] = {}
     state.mark("download", "running")
     for product in config.products:

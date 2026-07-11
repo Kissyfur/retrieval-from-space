@@ -5,9 +5,9 @@ from pathlib import Path
 import pandas as pd
 import xarray as xr
 
-from retrieval_from_space.config import TargetConfig
-from retrieval_from_space.features.coordinates import dms_to_decimal
-from retrieval_from_space.features.temporal import day_to_circle_x, day_to_circle_y
+from src.config import TargetConfig
+from src.features.coordinates import dms_to_decimal
+from src.features.temporal import day_to_circle_x, day_to_circle_y
 
 ID = "Id"
 LAT = "lat"
