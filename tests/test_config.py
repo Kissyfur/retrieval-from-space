@@ -94,8 +94,8 @@ def test_load_pseudonitzschia_cnn_classification_config():
     assert config.model.final_model.feature_groups == ["meta"]
     assert config.model.final_model.params["class_weight"] == "balanced"
     assert config.model.final_model.hyperparameter_search.enabled is False
-    assert len(config.model.base_models["optics"].hyperparameter_search.candidates) == 3
-    assert len(config.model.base_models["environment"].hyperparameter_search.candidates) == 3
+    assert len(config.model.base_models["optics"].hyperparameter_search.candidates) == 5
+    assert len(config.model.base_models["environment"].hyperparameter_search.candidates) == 5
     assert config.products[0].name == "reflectance"
     assert config.products[0].preprocess["mask_kinds"] == ["cloud_mask", "land_mask"]
     assert config.products[0].preprocess["min_valid_ratio"] == 0.3

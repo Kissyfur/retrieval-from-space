@@ -107,6 +107,22 @@ model:
             learning_rate: 0.0001
             name: m
             metrics: [accuracy]
+          - dims: [4, 4, 4, 4]
+            kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [7, 7, 15]]
+            output_dim: 3
+            dropout: 0.2
+            reg_factor: 0.0005
+            learning_rate: 0.0001
+            name: m_dropout
+            metrics: [accuracy]
+          - dims: [8, 8, 4, 4]
+            kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [7, 7, 15]]
+            output_dim: 3
+            dropout: 0.1
+            reg_factor: 0.0005
+            learning_rate: 0.00005
+            name: wider_slow
+            metrics: [accuracy]
     environment:
       family: cnn3d
       feature_groups: [nut, car, phy]
@@ -159,6 +175,22 @@ model:
             reg_factor: 0.0001
             learning_rate: 0.0001
             name: l
+            metrics: [accuracy]
+          - dims: [16, 8, 4, 4]
+            kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [5, 5, 15]]
+            output_dim: 3
+            dropout: 0.2
+            reg_factor: 0.0005
+            learning_rate: 0.0001
+            name: m_dropout
+            metrics: [accuracy]
+          - dims: [32, 16, 8, 4]
+            kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [5, 5, 15]]
+            output_dim: 3
+            dropout: 0.1
+            reg_factor: 0.0005
+            learning_rate: 0.00005
+            name: wider_slow
             metrics: [accuracy]
   final_model:
     family: random_forest
