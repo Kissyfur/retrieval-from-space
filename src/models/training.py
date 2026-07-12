@@ -110,6 +110,24 @@ def _stage_uses_cnn3d(stage: ModelStageConfig | ModelConfig) -> bool:
     return stage.family.lower() in {"cnn3d", "3d_cnn"}
 
 
+def _stage_uses_keras(stage: ModelStageConfig | ModelConfig) -> bool:
+    return stage.family.lower() in {"cnn3d", "3d_cnn", "dense", "mlp", "dense_nn", "tabular_nn"}
+
+
+def _stage_accepts_probability_targets(stage: ModelStageConfig | ModelConfig) -> bool:
+    return stage.family.lower() in {
+        "cnn",
+        "cnn1d",
+        "1d_cnn",
+        "cnn3d",
+        "3d_cnn",
+        "dense",
+        "mlp",
+        "dense_nn",
+        "tabular_nn",
+    }
+
+
 def _stage_slug(name: str) -> str:
     slug = "".join(char if char.isalnum() or char in {"_", "-"} else "_" for char in str(name))
     return slug.strip("_") or "stage"
@@ -325,11 +343,10 @@ def _validate_target_compatibility(
         return
     if np.asarray(y).ndim <= 1:
         return
-    family = stage.family.lower()
-    if family not in {"cnn", "cnn1d", "1d_cnn", "cnn3d", "3d_cnn"}:
+    if not _stage_accepts_probability_targets(stage):
         raise ValueError(
             "Probability-vector classification targets require a model family that accepts "
-            "2D class targets, such as cnn3d. Use problem.class_encoding: hard for tree models."
+            "2D class targets, such as cnn3d or dense. Use problem.class_encoding: hard for tree models."
         )
 
 
@@ -339,7 +356,7 @@ def _target_for_stage(
     y_target: np.ndarray,
     y_labels: np.ndarray,
 ) -> np.ndarray:
-    if problem_type == "classification" and np.asarray(y_target).ndim > 1 and not _stage_uses_cnn3d(stage):
+    if problem_type == "classification" and np.asarray(y_target).ndim > 1 and not _stage_accepts_probability_targets(stage):
         return y_labels
     return y_target
 
@@ -517,7 +534,7 @@ def _fit_estimator(
         random_state,
     )
     fit_params = dict(params)
-    if progress_description and _stage_uses_cnn3d(stage):
+    if progress_description and _stage_uses_keras(stage):
         fit_params.setdefault("progress_description", progress_description)
     model = create_model(problem_type, stage, params=fit_params)
     if sample_weight_fit is None:
@@ -759,6 +776,38 @@ def _save_named_stage_metrics(
     payload: dict[str, Any],
 ) -> Path:
     return _write_json(paths["metrics"] / f"{_stage_slug(stage_name)}_metrics.json", payload)
+
+
+def _save_confusion_matrix_plots(
+    paths: dict[str, Path],
+    prefix: str,
+    y_true,
+    y_pred,
+    labels=None,
+    title_prefix: str | None = None,
+) -> dict[str, Path]:
+    raw_path = paths["metrics"] / f"{prefix}_confusion_matrix.jpg"
+    normalized_path = paths["metrics"] / f"{prefix}_confusion_matrix_normalized_true.jpg"
+    title_prefix = title_prefix or prefix.replace("_", " ")
+    save_confusion_matrix_plot(
+        y_true,
+        y_pred,
+        raw_path,
+        labels=labels,
+        title=f"{title_prefix} confusion matrix",
+    )
+    save_confusion_matrix_plot(
+        y_true,
+        y_pred,
+        normalized_path,
+        labels=labels,
+        normalize="true",
+        title=f"{title_prefix} confusion matrix normalized by true label",
+    )
+    return {
+        f"{prefix}_confusion_matrix": raw_path,
+        f"{prefix}_confusion_matrix_normalized_true": normalized_path,
+    }
 
 
 def _ids_as_str(ids) -> np.ndarray:
@@ -1034,6 +1083,28 @@ def _fit_base_stage(
     base_test_pred = _prediction_labels(problem_type, base_test_signal)
     base_train_metrics = _evaluate(problem_type, train_metric_target, base_train_pred, label_values)
     base_test_metrics = _evaluate(problem_type, test_metric_target, base_test_pred, label_values)
+    base_confusion_plots = {}
+    if problem_type == "classification":
+        base_confusion_plots.update(
+            _save_confusion_matrix_plots(
+                paths,
+                f"base_{slug}_train_oof",
+                train_metric_target,
+                base_train_pred,
+                labels=label_values,
+                title_prefix=f"base {base_name} train OOF",
+            )
+        )
+        base_confusion_plots.update(
+            _save_confusion_matrix_plots(
+                paths,
+                f"base_{slug}_test",
+                test_metric_target,
+                base_test_pred,
+                labels=label_values,
+                title_prefix=f"base {base_name} test",
+            )
+        )
     base_report = {
         "stage": "base",
         "name": base_name,
@@ -1046,6 +1117,8 @@ def _fit_base_stage(
         "train_oof_metrics": base_train_metrics,
         "test_metrics": base_test_metrics,
     }
+    if base_confusion_plots:
+        base_report["confusion_matrix_plots"] = base_confusion_plots
 
     artifacts = {
         f"base_{slug}_{key}": value
@@ -1057,6 +1130,7 @@ def _fit_base_stage(
             base_cv_results,
         ).items()
     }
+    artifacts.update(base_confusion_plots)
     artifacts[f"base_{slug}_metrics"] = _save_named_stage_metrics(paths, f"base_{slug}", base_report)
     artifacts[f"base_{slug}_signals"] = _save_base_signals(
         paths, base_name, split_ids, base_oof_signal, base_test_signal

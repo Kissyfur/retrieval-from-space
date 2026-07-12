@@ -23,9 +23,11 @@ from src.models.training import _augment_training_data
 from src.models.training import _candidate_pool
 from src.models.training import _make_sample_weights
 from src.models.training import _splitter
+from src.models.training import train_base_models
 from src.models.training import train_final_model
 from src.models.training import train_model
 from src.models.cnn import KerasCNN3DEstimator
+from src.models.dense import KerasDenseEstimator
 from src.metrics.classification import save_confusion_matrix_plot
 from src.paths import RunPaths
 from src.pipeline.download import download_products
@@ -58,7 +60,7 @@ def test_load_synthetic_end_to_end_config():
 def test_load_pseudonitzschia_cnn_classification_config():
     config = load_config(Path("configs/pseudonitzschia_cnn_classification.yaml"))
     assert config.problem.type == "classification"
-    assert config.problem.class_encoding == "one_hot"
+    assert config.problem.class_encoding == "soft_probabilities"
     assert config.problem.soft_label_temperature == 1.0
     assert config.problem.soft_label_prior == 0.05
     assert config.problem.target_transform_offset == 100.0
@@ -95,24 +97,15 @@ def test_load_pseudonitzschia_cnn_classification_config():
         "nh4_div_no3",
     ]
     assert config.model.base_model is None
-    assert config.model.final_model.family == "random_forest"
+    assert config.model.final_model.family == "dense"
     assert config.model.final_model.feature_groups == ["meta"]
-    assert config.model.final_model.params["class_weight"] == "balanced"
+    assert config.model.final_model.standardize is True
+    assert config.model.final_model.params["hidden_units"] == [32, 16]
+    assert config.model.final_model.sample_weight["mode"] == "balanced"
     final_search = config.model.final_model.hyperparameter_search
     assert final_search.enabled is True
     assert final_search.cv == 5
-    assert final_search.n_iter == 24
-    assert final_search.random_state == 42
-    assert sorted(final_search.param_distributions) == [
-        "bootstrap",
-        "class_weight",
-        "max_depth",
-        "max_features",
-        "min_samples_leaf",
-        "min_samples_split",
-        "n_estimators",
-        "n_jobs",
-    ]
+    assert len(final_search.candidates) == 3
     assert len(config.model.base_models["optics"].hyperparameter_search.candidates) == 3
     assert len(config.model.base_models["environment"].hyperparameter_search.candidates) == 3
     assert config.products[0].name == "reflectance"
@@ -140,9 +133,11 @@ def test_tree_stage_uses_hard_labels_when_pipeline_targets_are_soft():
 
     tree_target = _target_for_stage("classification", ModelStageConfig(family="random_forest"), soft, hard)
     cnn_target = _target_for_stage("classification", ModelStageConfig(family="cnn3d"), soft, hard)
+    dense_target = _target_for_stage("classification", ModelStageConfig(family="dense"), soft, hard)
 
     assert tree_target.tolist() == [1, 0]
     assert np.allclose(cnn_target, soft)
+    assert np.allclose(dense_target, soft)
 
 
 def test_splitter_supports_stratified_cv():
@@ -789,6 +784,62 @@ def test_multi_base_stacking_saves_stage_metrics(tmp_path):
     assert refreshed_stage_metrics["stages"][-1]["input_variant"] == "all_base_oof_signals_plus_metadata"
 
 
+def test_classification_base_stage_saves_confusion_matrix_plots(tmp_path):
+    run_root = tmp_path / "run"
+    datasets_dir = run_root / "datasets"
+    datasets_dir.mkdir(parents=True)
+    ids = np.arange(30)
+    labels = np.tile(np.arange(3), 10)
+    features = np.column_stack(
+        [
+            labels == 0,
+            labels == 1,
+            labels == 2,
+            ids / len(ids),
+        ]
+    ).astype(np.float32)
+
+    xr.DataArray(
+        labels.reshape(-1, 1),
+        dims=("Id", "variable"),
+        coords={"Id": ids, "variable": ["target"]},
+    ).to_netcdf(datasets_dir / "target.nc")
+    xr.DataArray(
+        features,
+        dims=("Id", "variable"),
+        coords={"Id": ids, "variable": ["f0", "f1", "f2", "trend"]},
+    ).to_netcdf(datasets_dir / "optics.nc")
+
+    config = PipelineConfig(
+        target=TargetConfig(path=str(tmp_path / "unused.csv"), target_column="target"),
+        products=[],
+        problem=ProblemConfig(type="classification", test_size=0.3, random_state=42),
+        model=ModelConfig(
+            strategy="stacking",
+            base_models={
+                "optics": ModelStageConfig(
+                    family="random_forest",
+                    feature_groups=["optics"],
+                    params={"n_estimators": 3, "random_state": 42},
+                ),
+            },
+        ),
+    )
+
+    artifacts = train_base_models(config, run_root)
+    report = json.loads((run_root / "metrics" / "base_optics_metrics.json").read_text())
+
+    for name in [
+        "base_optics_train_oof_confusion_matrix",
+        "base_optics_train_oof_confusion_matrix_normalized_true",
+        "base_optics_test_confusion_matrix",
+        "base_optics_test_confusion_matrix_normalized_true",
+    ]:
+        assert artifacts[name].exists()
+        assert artifacts[name].stat().st_size > 0
+        assert name in report["confusion_matrix_plots"]
+
+
 def test_keras_cnn_estimator_exposes_classes_for_sklearn_scorers():
     class FakeModel:
         def predict(self, x, verbose=0):
@@ -800,3 +851,16 @@ def test_keras_cnn_estimator_exposes_classes_for_sklearn_scorers():
 
     assert estimator.classes_.tolist() == [0, 1, 2]
     assert estimator.predict(np.zeros((2, 2, 2, 2, 1))).tolist() == [1, 0]
+
+
+def test_keras_dense_estimator_exposes_classes_for_sklearn_scorers():
+    class FakeModel:
+        def predict(self, x, verbose=0):
+            return np.array([[0.2, 0.7, 0.1], [0.6, 0.2, 0.2]])
+
+    estimator = KerasDenseEstimator("classification")
+    estimator._set_classes_from_target(np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0]]))
+    estimator.model = FakeModel()
+
+    assert estimator.classes_.tolist() == [0, 1, 2]
+    assert estimator.predict(np.zeros((2, 3))).tolist() == [1, 0]

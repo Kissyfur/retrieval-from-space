@@ -28,7 +28,7 @@ problem:
   class_labels: [low, medium, high]
   # Set to "one_hot" to reproduce the notebook's executed one-hot labels.
   # "soft_probabilities" uses smooth interval probabilities for gentler class transitions.
-  class_encoding: one_hot
+  class_encoding: soft_probabilities
   # Used only when class_encoding is "soft_probabilities".
   soft_label_temperature: 1.0
   soft_label_prior: 0.05
@@ -162,40 +162,47 @@ model:
             name: m
             metrics: [accuracy]
   final_model:
-    family: random_forest
+    family: dense
     feature_groups: [meta]
-    standardize: false
+    standardize: true
     params:
-      random_state: 42
-      n_estimators: 600
-      max_depth: 6
-      min_samples_leaf: 5
-      class_weight: balanced
-      n_jobs: -1
+      output_dim: 3
+      loss: categorical_crossentropy
+      final_activation: softmax
+      seed: 42
+      metrics: [accuracy]
+      batch_size: 64
+      epochs: 500
+      patience: 20
+      validation_split: 0.15
+      hidden_units: [32, 16]
+      dropout: 0.1
+      reg_factor: 0.0005
+      learning_rate: 0.001
+      nan_fill: 0.0
+    sample_weight:
+      mode: balanced
+      class_boost: [1.0, 1.0, 1.0]
     hyperparameter_search:
       enabled: true
       cv: 5
       scoring: f1_macro
-      n_iter: 24
-      random_state: 42
-      param_distributions:
-        n_estimators:
-          type: randint
-          low: 300
-          high: 1200
-        max_depth: [3, 4, 5, 6, 8, 10, 12, null]
-        min_samples_leaf:
-          type: randint
-          low: 2
-          high: 12
-        min_samples_split:
-          type: randint
-          low: 2
-          high: 24
-        max_features: [sqrt, log2, 0.5, 0.75, null]
-        class_weight: [balanced, balanced_subsample]
-        bootstrap: [true]
-        n_jobs: [-1]
+      candidates:
+        - hidden_units: [32]
+          dropout: 0.0
+          reg_factor: 0.0005
+          learning_rate: 0.001
+          name: dense_small
+        - hidden_units: [32, 16]
+          dropout: 0.1
+          reg_factor: 0.0005
+          learning_rate: 0.001
+          name: dense_medium
+        - hidden_units: [64, 32]
+          dropout: 0.2
+          reg_factor: 0.001
+          learning_rate: 0.0005
+          name: dense_regularized
 
 products:
   - name: reflectance
