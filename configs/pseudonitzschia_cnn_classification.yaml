@@ -204,8 +204,29 @@ model:
       class_weight: balanced
       n_jobs: -1
     hyperparameter_search:
-      enabled: false
+      enabled: true
+      cv: 5
       scoring: f1_macro
+      n_iter: 24
+      random_state: 42
+      param_distributions:
+        n_estimators:
+          type: randint
+          low: 300
+          high: 1200
+        max_depth: [3, 4, 5, 6, 8, 10, 12, null]
+        min_samples_leaf:
+          type: randint
+          low: 2
+          high: 12
+        min_samples_split:
+          type: randint
+          low: 2
+          high: 24
+        max_features: [sqrt, log2, 0.5, 0.75, null]
+        class_weight: [balanced, balanced_subsample]
+        bootstrap: [true]
+        n_jobs: [-1]
 
 products:
   - name: reflectance

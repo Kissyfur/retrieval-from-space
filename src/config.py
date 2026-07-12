@@ -202,6 +202,9 @@ class HyperparameterSearchConfig:
     scoring: str | None = None
     candidates: list[dict[str, Any]] = field(default_factory=list)
     param_grid: dict[str, list[Any]] = field(default_factory=dict)
+    param_distributions: dict[str, Any] = field(default_factory=dict)
+    n_iter: int = 10
+    random_state: int | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "HyperparameterSearchConfig":
@@ -212,6 +215,13 @@ class HyperparameterSearchConfig:
             scoring=data.get("scoring"),
             candidates=[dict(v) for v in data.get("candidates", [])],
             param_grid=dict(data.get("param_grid", {})),
+            param_distributions=dict(data.get("param_distributions", data.get("param_dist", {}))),
+            n_iter=int(data.get("n_iter", data.get("n_candidates", 10))),
+            random_state=(
+                None
+                if data.get("random_state") is None
+                else int(data.get("random_state"))
+            ),
         )
 
 

@@ -20,6 +20,7 @@ from src.models.training import interval_soft_labeling
 from src.models.training import _load_matrix_for_groups
 from src.models.training import _target_for_stage
 from src.models.training import _augment_training_data
+from src.models.training import _candidate_pool
 from src.models.training import _make_sample_weights
 from src.models.training import _splitter
 from src.models.training import train_final_model
@@ -94,7 +95,21 @@ def test_load_pseudonitzschia_cnn_classification_config():
     assert config.model.final_model.family == "random_forest"
     assert config.model.final_model.feature_groups == ["meta"]
     assert config.model.final_model.params["class_weight"] == "balanced"
-    assert config.model.final_model.hyperparameter_search.enabled is False
+    final_search = config.model.final_model.hyperparameter_search
+    assert final_search.enabled is True
+    assert final_search.cv == 5
+    assert final_search.n_iter == 24
+    assert final_search.random_state == 42
+    assert sorted(final_search.param_distributions) == [
+        "bootstrap",
+        "class_weight",
+        "max_depth",
+        "max_features",
+        "min_samples_leaf",
+        "min_samples_split",
+        "n_estimators",
+        "n_jobs",
+    ]
     assert len(config.model.base_models["optics"].hyperparameter_search.candidates) == 5
     assert len(config.model.base_models["environment"].hyperparameter_search.candidates) == 5
     assert config.products[0].name == "reflectance"
@@ -135,6 +150,36 @@ def test_splitter_supports_stratified_cv():
     splits = list(splitter.split(x, y))
 
     assert len(splits) == 3
+
+
+def test_random_search_parameter_distributions_are_sampled():
+    stage = ModelStageConfig.from_dict(
+        {
+            "family": "random_forest",
+            "params": {"random_state": 42, "n_jobs": -1},
+            "hyperparameter_search": {
+                "enabled": True,
+                "n_iter": 5,
+                "random_state": 123,
+                "param_distributions": {
+                    "n_estimators": {"type": "randint", "low": 10, "high": 20},
+                    "max_depth": [3, 4, None],
+                    "class_weight": ["balanced", "balanced_subsample"],
+                },
+            },
+        }
+    )
+
+    candidates = _candidate_pool(stage)
+
+    assert len(candidates) == 5
+    assert all(10 <= candidate["n_estimators"] <= 20 for candidate in candidates)
+    assert all(candidate["max_depth"] in {3, 4, None} for candidate in candidates)
+    assert all(
+        candidate["class_weight"] in {"balanced", "balanced_subsample"}
+        for candidate in candidates
+    )
+    assert {candidate["n_jobs"] for candidate in candidates} == {-1}
 
 
 def test_confusion_matrix_plot_is_saved(tmp_path):

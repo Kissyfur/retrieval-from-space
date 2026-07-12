@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 from sklearn.metrics import get_scorer
-from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
+from sklearn.model_selection import KFold, ParameterSampler, StratifiedKFold, train_test_split
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from tqdm.auto import tqdm
 
@@ -236,6 +236,56 @@ def _prepare_labels(problem_type: str, y: np.ndarray, config: PipelineConfig):
     return hard_labels, hard_labels, label_values, label_encoder
 
 
+def _parameter_distribution(spec: Any):
+    if not isinstance(spec, dict):
+        return spec
+    if "values" in spec:
+        return list(spec["values"])
+
+    dist_type = str(spec.get("type", spec.get("distribution", ""))).lower()
+    if dist_type in {"choice", "categorical"}:
+        return list(spec["options"])
+
+    if dist_type in {"randint", "int", "integer"}:
+        from scipy.stats import randint
+
+        low = int(spec.get("low", spec.get("min")))
+        high = int(spec.get("high", spec.get("max")))
+        return randint(low, high + 1)
+
+    if dist_type in {"uniform", "float"}:
+        from scipy.stats import uniform
+
+        low = float(spec.get("low", spec.get("min")))
+        high = float(spec.get("high", spec.get("max")))
+        return uniform(low, high - low)
+
+    if dist_type in {"loguniform", "log_uniform"}:
+        from scipy.stats import loguniform
+
+        low = float(spec.get("low", spec.get("min")))
+        high = float(spec.get("high", spec.get("max")))
+        return loguniform(low, high)
+
+    return spec
+
+
+def _sampled_candidates(stage: ModelStageConfig) -> list[dict[str, Any]]:
+    search = stage.hyperparameter_search
+    if not search.param_distributions:
+        return []
+    distributions = {
+        key: _parameter_distribution(value)
+        for key, value in search.param_distributions.items()
+    }
+    sampler = ParameterSampler(
+        distributions,
+        n_iter=int(search.n_iter),
+        random_state=search.random_state,
+    )
+    return [{**stage.params, **dict(candidate)} for candidate in sampler]
+
+
 def _candidate_pool(stage: ModelStageConfig) -> list[dict[str, Any]]:
     search = stage.hyperparameter_search
     if not search.enabled:
@@ -245,6 +295,7 @@ def _candidate_pool(stage: ModelStageConfig) -> list[dict[str, Any]]:
         keys = list(search.param_grid.keys())
         for values in product(*[search.param_grid[key] for key in keys]):
             candidates.append({**stage.params, **dict(zip(keys, values))})
+    candidates.extend(_sampled_candidates(stage))
     return candidates or [dict(stage.params)]
 
 
