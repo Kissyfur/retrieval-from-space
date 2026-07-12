@@ -178,6 +178,21 @@ model:
 The `meta` dataset computes cyclic day-of-year features as `x_day` and `y_day`
 from the target `time` column, then appends the configured metadata columns.
 
+Stacked training can be run in separate steps. First train the base models; this
+saves out-of-fold train signals and fitted test signals under the run's
+`metrics/` folder:
+
+```bash
+python bin/train_model.py --config configs/pseudonitzschia_cnn_classification.yaml --run-id <run_id> --stage base
+```
+
+Then train only the final model. This loads the saved base signals, stacks them
+with `meta.nc`, and fits the configured final model:
+
+```bash
+python bin/train_model.py --config configs/pseudonitzschia_cnn_classification.yaml --run-id <run_id> --stage final
+```
+
 For regression, `residual_correction` trains the final model to predict `target - base_prediction`, then adds that correction back to the base prediction.
 
 ```yaml
