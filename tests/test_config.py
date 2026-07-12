@@ -59,7 +59,8 @@ def test_load_pseudonitzschia_cnn_classification_config():
     config = load_config(Path("configs/pseudonitzschia_cnn_classification.yaml"))
     assert config.problem.type == "classification"
     assert config.problem.class_encoding == "soft_probabilities"
-    assert config.problem.soft_label_temperature == 10.0
+    assert config.problem.soft_label_temperature == 1.0
+    assert config.problem.soft_label_prior == 0.05
     assert config.problem.target_transform_offset == 100.0
     assert np.allclose(
         np.asarray(config.problem.class_intervals)[:, 0],
@@ -77,9 +78,11 @@ def test_load_pseudonitzschia_cnn_classification_config():
     assert config.model.base_models["environment"].family == "cnn3d"
     assert config.model.base_models["environment"].feature_groups == ["nut", "car", "phy"]
     assert config.model.base_models["optics"].sample_weight["mode"] == "balanced"
+    assert config.model.base_models["optics"].sample_weight["class_boost"] == [1.0, 1.0, 1.5]
     assert config.model.base_models["optics"].augmentation["enabled"] is True
     assert config.model.base_models["optics"].augmentation["repetitions"] == 10
     assert config.model.base_models["environment"].sample_weight["mode"] == "balanced"
+    assert config.model.base_models["environment"].sample_weight["class_boost"] == [1.0, 1.0, 1.5]
     assert config.model.base_models["environment"].augmentation["enabled"] is True
     assert config.model.base_models["environment"].augmentation["repetitions"] == 10
     environment_noise = config.model.base_models["environment"].augmentation["noise_std"]
@@ -110,8 +113,8 @@ def test_load_pseudonitzschia_cnn_classification_config():
         "n_estimators",
         "n_jobs",
     ]
-    assert len(config.model.base_models["optics"].hyperparameter_search.candidates) == 5
-    assert len(config.model.base_models["environment"].hyperparameter_search.candidates) == 5
+    assert len(config.model.base_models["optics"].hyperparameter_search.candidates) == 3
+    assert len(config.model.base_models["environment"].hyperparameter_search.candidates) == 3
     assert config.products[0].name == "reflectance"
     assert config.products[0].preprocess["mask_kinds"] == ["cloud_mask", "land_mask"]
     assert config.products[0].preprocess["min_valid_ratio"] == 0.3

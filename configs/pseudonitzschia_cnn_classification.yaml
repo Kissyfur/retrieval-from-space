@@ -29,8 +29,8 @@ problem:
   # Set to "one_hot" to reproduce the notebook's executed one-hot labels.
   # "soft_probabilities" uses smooth interval probabilities for gentler class transitions.
   class_encoding: soft_probabilities
-  soft_label_temperature: 10.0
-  soft_label_prior: 1.0
+  soft_label_temperature: 1.0
+  soft_label_prior: 0.05
   test_size: 0.15
   random_state: 42
 
@@ -71,7 +71,7 @@ model:
         validation_split: 0.15
       sample_weight:
         mode: balanced
-        class_boost: [1.0, 1.0, 1.0]
+        class_boost: [1.0, 1.0, 1.5]
       augmentation:
         enabled: true
         repetitions: 10
@@ -83,30 +83,6 @@ model:
         cv: 3
         scoring: f1_macro
         candidates:
-          - dims: [4, 4, 4]
-            kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [5, 5, 15]]
-            output_dim: 3
-            dropout: 0.0
-            reg_factor: 0.001
-            learning_rate: 0.0001
-            name: s
-            metrics: [accuracy]
-          - dims: [4, 4, 4, 4]
-            kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [7, 7, 15]]
-            output_dim: 3
-            dropout: 0.0
-            reg_factor: 0.001
-            learning_rate: 0.0001
-            name: m
-            metrics: [accuracy]
-          - dims: [4, 4, 4, 4, 4]
-            kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [7, 7, 15], [9, 9, 15]]
-            output_dim: 3
-            dropout: 0.0
-            reg_factor: 0.001
-            learning_rate: 0.0001
-            name: m
-            metrics: [accuracy]
           - dims: [4, 4, 4, 4]
             kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [7, 7, 15]]
             output_dim: 3
@@ -115,13 +91,21 @@ model:
             learning_rate: 0.0001
             name: m_dropout
             metrics: [accuracy]
-          - dims: [8, 8, 4, 4]
+          - dims: [4, 4, 4, 4]
             kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [7, 7, 15]]
             output_dim: 3
-            dropout: 0.1
-            reg_factor: 0.0005
-            learning_rate: 0.00005
-            name: wider_slow
+            dropout: 0.0
+            reg_factor: 0.001
+            learning_rate: 0.0001
+            name: m
+            metrics: [accuracy]
+          - dims: [4, 4, 4]
+            kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [5, 5, 15]]
+            output_dim: 3
+            dropout: 0.0
+            reg_factor: 0.001
+            learning_rate: 0.0001
+            name: s
             metrics: [accuracy]
     environment:
       family: cnn3d
@@ -138,7 +122,7 @@ model:
         validation_split: 0.15
       sample_weight:
         mode: balanced
-        class_boost: [1.0, 1.0, 1.0]
+        class_boost: [1.0, 1.0, 1.5]
       augmentation:
         enabled: true
         repetitions: 10
@@ -152,30 +136,6 @@ model:
         cv: 3
         scoring: f1_macro
         candidates:
-          - dims: [8, 4, 4]
-            kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12]]
-            output_dim: 3
-            dropout: 0.0
-            reg_factor: 0.0001
-            learning_rate: 0.0001
-            name: s
-            metrics: [accuracy]
-          - dims: [16, 8, 4, 4]
-            kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [5, 5, 15]]
-            output_dim: 3
-            dropout: 0.0
-            reg_factor: 0.0001
-            learning_rate: 0.0001
-            name: m
-            metrics: [accuracy]
-          - dims: [64, 64, 16, 4, 4]
-            kernel_sizes: [[2, 2, 7], [2, 2, 7], [3, 3, 10], [5, 5, 12], [5, 5, 15]]
-            output_dim: 3
-            dropout: 0.0
-            reg_factor: 0.0001
-            learning_rate: 0.0001
-            name: l
-            metrics: [accuracy]
           - dims: [16, 8, 4, 4]
             kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [5, 5, 15]]
             output_dim: 3
@@ -191,6 +151,14 @@ model:
             reg_factor: 0.0005
             learning_rate: 0.00005
             name: wider_slow
+            metrics: [accuracy]
+          - dims: [16, 8, 4, 4]
+            kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [5, 5, 15]]
+            output_dim: 3
+            dropout: 0.0
+            reg_factor: 0.0001
+            learning_rate: 0.0001
+            name: m
             metrics: [accuracy]
   final_model:
     family: random_forest
