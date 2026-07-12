@@ -28,7 +28,8 @@ problem:
   class_labels: [low, medium, high]
   # Set to "one_hot" to reproduce the notebook's executed one-hot labels.
   # "soft_probabilities" uses smooth interval probabilities for gentler class transitions.
-  class_encoding: soft_probabilities
+  class_encoding: one_hot
+  # Used only when class_encoding is "soft_probabilities".
   soft_label_temperature: 1.0
   soft_label_prior: 0.05
   test_size: 0.15
@@ -71,7 +72,7 @@ model:
         validation_split: 0.15
       sample_weight:
         mode: balanced
-        class_boost: [1.0, 1.0, 1.5]
+        class_boost: [1.0, 1.0, 1.0]
       augmentation:
         enabled: true
         repetitions: 10
@@ -122,7 +123,7 @@ model:
         validation_split: 0.15
       sample_weight:
         mode: balanced
-        class_boost: [1.0, 1.0, 1.5]
+        class_boost: [1.0, 1.0, 1.0]
       augmentation:
         enabled: true
         repetitions: 10

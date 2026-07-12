@@ -58,7 +58,7 @@ def test_load_synthetic_end_to_end_config():
 def test_load_pseudonitzschia_cnn_classification_config():
     config = load_config(Path("configs/pseudonitzschia_cnn_classification.yaml"))
     assert config.problem.type == "classification"
-    assert config.problem.class_encoding == "soft_probabilities"
+    assert config.problem.class_encoding == "one_hot"
     assert config.problem.soft_label_temperature == 1.0
     assert config.problem.soft_label_prior == 0.05
     assert config.problem.target_transform_offset == 100.0
@@ -78,11 +78,11 @@ def test_load_pseudonitzschia_cnn_classification_config():
     assert config.model.base_models["environment"].family == "cnn3d"
     assert config.model.base_models["environment"].feature_groups == ["nut", "car", "phy"]
     assert config.model.base_models["optics"].sample_weight["mode"] == "balanced"
-    assert config.model.base_models["optics"].sample_weight["class_boost"] == [1.0, 1.0, 1.5]
+    assert config.model.base_models["optics"].sample_weight["class_boost"] == [1.0, 1.0, 1.0]
     assert config.model.base_models["optics"].augmentation["enabled"] is True
     assert config.model.base_models["optics"].augmentation["repetitions"] == 10
     assert config.model.base_models["environment"].sample_weight["mode"] == "balanced"
-    assert config.model.base_models["environment"].sample_weight["class_boost"] == [1.0, 1.0, 1.5]
+    assert config.model.base_models["environment"].sample_weight["class_boost"] == [1.0, 1.0, 1.0]
     assert config.model.base_models["environment"].augmentation["enabled"] is True
     assert config.model.base_models["environment"].augmentation["repetitions"] == 10
     environment_noise = config.model.base_models["environment"].augmentation["noise_std"]
