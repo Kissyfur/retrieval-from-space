@@ -26,7 +26,7 @@ problem:
   class_encoding: soft_probabilities
   soft_label_temperature: 1.0
   soft_label_prior: 0.05
-  test_size: 0.15
+  test_size: 0.2
   random_state: 42
 
 matchup:
@@ -79,26 +79,26 @@ model:
       - dims: [16, 8, 4, 4]
         kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [5, 5, 15]]
         output_dim: 3
-        dropout: 0.2
-        reg_factor: 0.0005
-        learning_rate: 0.0001
-        name: m_dropout
-        metrics: [accuracy]
-      - dims: [32, 16, 8, 4]
-        kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [5, 5, 15]]
-        output_dim: 3
-        dropout: 0.1
-        reg_factor: 0.0005
-        learning_rate: 0.00005
-        name: wider_slow
-        metrics: [accuracy]
-      - dims: [16, 8, 4, 4]
-        kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [5, 5, 15]]
-        output_dim: 3
         dropout: 0.0
         reg_factor: 0.0001
         learning_rate: 0.0001
         name: m
+        metrics: [accuracy]
+      - dims: [8, 4, 4]
+        kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12]]
+        output_dim: 3
+        dropout: 0.0
+        reg_factor: 0.0001
+        learning_rate: 0.0001
+        name: small
+        metrics: [accuracy]
+      - dims: [8, 4, 4]
+        kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12]]
+        output_dim: 3
+        dropout: 0.1
+        reg_factor: 0.0005
+        learning_rate: 0.0001
+        name: small_regularized
         metrics: [accuracy]
 
 products:

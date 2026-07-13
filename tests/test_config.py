@@ -34,12 +34,19 @@ def test_pseudonitzschia_configs_are_single_model_experiments():
     ]
     assert optics.problem.class_encoding == "soft_probabilities"
     assert optics.problem.target_transform_offset == 100.0
+    assert optics.problem.test_size == 0.2
 
     assert environment.model.family == "cnn3d"
     assert environment.model.feature_groups == ["nut", "car", "phy"]
+    assert environment.problem.test_size == 0.2
     assert len(environment.products) == 10
     assert environment.products[0].preprocess["derived_variables"][0]["name"] == "din"
     assert environment.products[7].preprocess["exclude_from_log1p"] == ["ph"]
+    assert [candidate["name"] for candidate in environment.model.hyperparameter_search.candidates] == [
+        "m",
+        "small",
+        "small_regularized",
+    ]
 
     for config in [optics, environment]:
         assert not hasattr(config.model, "strategy")

@@ -26,7 +26,7 @@ problem:
   class_encoding: soft_probabilities
   soft_label_temperature: 1.0
   soft_label_prior: 0.05
-  test_size: 0.15
+  test_size: 0.2
   random_state: 42
 
 matchup:
