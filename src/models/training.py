@@ -882,6 +882,46 @@ def _select_final_base_signals(
     )
 
 
+def _final_base_comparison(
+    problem_type: str,
+    base_reports: list[dict[str, Any]],
+    final_report: dict[str, Any],
+) -> dict[str, Any]:
+    metric_name = _default_scoring(problem_type)
+    higher_is_better = metric_name not in {"mae", "mse", "rmse"}
+    final_value = final_report.get("test_metrics", {}).get(metric_name)
+    base_values = {
+        str(report.get("name", f"base_{index}")): report.get("test_metrics", {}).get(metric_name)
+        for index, report in enumerate(base_reports)
+        if report.get("test_metrics", {}).get(metric_name) is not None
+    }
+    if final_value is None or not base_values:
+        return {
+            "primary_metric": metric_name,
+            "higher_is_better": higher_is_better,
+            "available": False,
+        }
+
+    best_base_name, best_base_value = sorted(
+        base_values.items(),
+        key=lambda item: item[1],
+        reverse=higher_is_better,
+    )[0]
+    delta = float(final_value) - float(best_base_value)
+    improved = delta > 0 if higher_is_better else delta < 0
+    return {
+        "primary_metric": metric_name,
+        "higher_is_better": higher_is_better,
+        "available": True,
+        "base_values": {name: float(value) for name, value in base_values.items()},
+        "best_base_model": best_base_name,
+        "best_base_value": float(best_base_value),
+        "final_value": float(final_value),
+        "delta_vs_best_base": delta,
+        "final_improved_over_best_base": bool(improved),
+    }
+
+
 def _save_common_outputs(
     paths: dict[str, Path],
     problem_type: str,
@@ -1579,6 +1619,8 @@ def _train_final_from_base_signals(
     if final_oof_metrics is not None:
         final_report["oof_cv"] = final_oof_cv
         final_report["train_oof_metrics"] = final_oof_metrics
+    base_comparison = _final_base_comparison(problem_type, list(base_reports), final_report)
+    final_report["comparison_to_base_models"] = base_comparison
     training_report = {
         "strategy": strategy,
         "problem_type": problem_type,
@@ -1599,9 +1641,11 @@ def _train_final_from_base_signals(
             "input_feature_columns": final_feature_columns,
             "input_base_models": final_input_base_models,
             "base_prediction_columns": base_prediction_columns,
+            "comparison_to_base_models": base_comparison,
         },
         "stages": list(base_reports) + [final_report],
         "final_metrics": metrics,
+        "final_vs_best_base": base_comparison,
     }
     artifacts["final_metrics"] = _save_named_stage_metrics(paths, "final", final_report)
     artifacts.update(_save_training_report(paths, training_report))

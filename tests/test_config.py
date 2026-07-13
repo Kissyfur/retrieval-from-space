@@ -101,17 +101,20 @@ def test_load_pseudonitzschia_cnn_classification_config():
     assert config.model.final_model.feature_groups == ["meta"]
     assert config.model.final_model.input_base_models == ["environment"]
     assert config.model.final_model.standardize is False
+    assert config.model.final_model.params["max_depth"] == 4
+    assert config.model.final_model.params["min_samples_leaf"] == 12
     assert config.model.final_model.params["class_weight"] == "balanced"
     final_search = config.model.final_model.hyperparameter_search
     assert final_search.enabled is True
     assert final_search.cv == 5
-    assert final_search.n_iter == 24
+    assert final_search.n_iter == 20
     assert final_search.random_state == 42
     assert sorted(final_search.param_distributions) == [
         "bootstrap",
         "class_weight",
         "max_depth",
         "max_features",
+        "max_samples",
         "min_samples_leaf",
         "min_samples_split",
         "n_estimators",
@@ -781,6 +784,12 @@ def test_multi_base_stacking_saves_stage_metrics(tmp_path):
     assert stage_metrics["stages"][-1]["input_variant"] == "selected_base_oof_signals_plus_metadata"
     assert stage_metrics["stages"][-1]["input_base_models"] == ["physics"]
     assert stage_metrics["stages"][-1]["base_prediction_columns"] == ["base_physics_signal"]
+    comparison = stage_metrics["final_vs_best_base"]
+    assert comparison["available"] is True
+    assert comparison["primary_metric"] == "r2"
+    assert comparison["best_base_model"] in {"optics", "physics"}
+    assert isinstance(comparison["final_improved_over_best_base"], bool)
+    assert stage_metrics["stages"][-1]["comparison_to_base_models"] == comparison
     assert "train_oof_metrics" in stage_metrics["stages"][-1]
     assert "train_oof_metrics" in stage_metrics["stages"][0]
     assert "base_optics_signal" not in predictions.columns
@@ -797,6 +806,7 @@ def test_multi_base_stacking_saves_stage_metrics(tmp_path):
     assert [stage["name"] for stage in refreshed_stage_metrics["stages"]] == ["optics", "physics", "final"]
     assert refreshed_stage_metrics["stages"][-1]["input_variant"] == "selected_base_oof_signals_plus_metadata"
     assert refreshed_stage_metrics["stages"][-1]["input_base_models"] == ["physics"]
+    assert refreshed_stage_metrics["final_vs_best_base"]["available"] is True
 
 
 def test_classification_base_stage_saves_confusion_matrix_plots(tmp_path):

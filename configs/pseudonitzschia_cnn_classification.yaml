@@ -168,34 +168,37 @@ model:
     standardize: false
     params:
       random_state: 42
-      n_estimators: 600
-      max_depth: 6
-      min_samples_leaf: 5
+      n_estimators: 800
+      max_depth: 4
+      min_samples_leaf: 12
+      min_samples_split: 24
+      max_features: sqrt
       class_weight: balanced
       n_jobs: -1
     hyperparameter_search:
       enabled: true
       cv: 5
       scoring: f1_macro
-      n_iter: 24
+      n_iter: 20
       random_state: 42
       param_distributions:
         n_estimators:
           type: randint
-          low: 300
-          high: 1200
-        max_depth: [3, 4, 5, 6, 8, 10, 12, null]
+          low: 400
+          high: 1000
+        max_depth: [3, 4, 5, 6, 8]
         min_samples_leaf:
           type: randint
-          low: 2
-          high: 12
+          low: 8
+          high: 30
         min_samples_split:
           type: randint
-          low: 2
-          high: 24
-        max_features: [sqrt, log2, 0.5, 0.75, null]
-        class_weight: [balanced, balanced_subsample]
+          low: 16
+          high: 60
+        max_features: [sqrt, log2, 0.5, 0.75]
+        class_weight: [balanced, balanced_subsample, null]
         bootstrap: [true]
+        max_samples: [0.6, 0.8, null]
         n_jobs: [-1]
 
 products:
