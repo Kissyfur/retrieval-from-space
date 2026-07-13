@@ -26,8 +26,14 @@ problem:
   class_encoding: soft_probabilities
   soft_label_temperature: 1.0
   soft_label_prior: 0.05
-  test_size: 0.2
+  test_size: 0.15
   random_state: 42
+  decision_thresholds:
+    enabled: true
+    class_index: 2
+    threshold: 0.45
+    apply: true
+    thresholds: [0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6]
 
 matchup:
   lat_window: 0.06

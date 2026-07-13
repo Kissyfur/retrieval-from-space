@@ -158,6 +158,7 @@ class ProblemConfig:
     soft_label_prior: float = 1.0
     test_size: float = 0.2
     random_state: int = 42
+    decision_thresholds: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "ProblemConfig":
@@ -192,6 +193,7 @@ class ProblemConfig:
             soft_label_prior=float(data.get("soft_label_prior", 1.0)),
             test_size=float(data.get("test_size", 0.2)),
             random_state=int(data.get("random_state", 42)),
+            decision_thresholds=dict(data.get("decision_thresholds", {})),
         )
 
 

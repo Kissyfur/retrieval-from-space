@@ -26,8 +26,14 @@ problem:
   class_encoding: soft_probabilities
   soft_label_temperature: 1.0
   soft_label_prior: 0.05
-  test_size: 0.2
+  test_size: 0.15
   random_state: 42
+  decision_thresholds:
+    enabled: true
+    class_index: 2
+    threshold: 0.45
+    apply: true
+    thresholds: [0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6]
 
 matchup:
   lat_window: 0.06
@@ -84,21 +90,21 @@ model:
         learning_rate: 0.0001
         name: m
         metrics: [accuracy]
-      - dims: [8, 4, 4]
-        kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12]]
-        output_dim: 3
-        dropout: 0.0
-        reg_factor: 0.0001
-        learning_rate: 0.0001
-        name: small
-        metrics: [accuracy]
-      - dims: [8, 4, 4]
-        kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12]]
+      - dims: [16, 8, 4, 4]
+        kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [5, 5, 15]]
         output_dim: 3
         dropout: 0.1
+        reg_factor: 0.0002
+        learning_rate: 0.0001
+        name: m_light_regularized
+        metrics: [accuracy]
+      - dims: [16, 8, 4, 4]
+        kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [5, 5, 15]]
+        output_dim: 3
+        dropout: 0.2
         reg_factor: 0.0005
         learning_rate: 0.0001
-        name: small_regularized
+        name: m_dropout
         metrics: [accuracy]
 
 products:

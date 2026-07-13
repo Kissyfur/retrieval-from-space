@@ -15,7 +15,13 @@ from sklearn.preprocessing import LabelEncoder, StandardScaler
 from tqdm.auto import tqdm
 
 from src.config import ModelConfig, PipelineConfig
-from src.metrics.classification import classification_metrics, save_confusion_matrix_plot
+from src.metrics.classification import (
+    classification_metrics,
+    labels_from_probabilities,
+    save_confusion_matrix_plot,
+    save_threshold_curve_plot,
+    threshold_curve_metrics,
+)
 from src.metrics.regression import regression_metrics
 from src.models.factory import create_model
 from src.models.tree import save_pickle_model
@@ -516,6 +522,23 @@ def _fit_estimator(
     return model, scaler
 
 
+def _score_classification_predictions(y_true, y_pred, scoring: str) -> float:
+    metrics = classification_metrics(y_true, y_pred)
+    scoring = str(scoring).lower()
+    if scoring == "accuracy":
+        return float(metrics["accuracy"])
+    if scoring in {"f1", "f1_macro"}:
+        return float(metrics["f1_macro"])
+    if scoring == "precision_macro":
+        return float(metrics["precision_macro"])
+    if scoring == "recall_macro":
+        return float(metrics["recall_macro"])
+    raise ValueError(
+        "Threshold-based classification scoring supports accuracy, f1_macro, "
+        "precision_macro, and recall_macro."
+    )
+
+
 def _select_params(
     problem_type: str,
     model_config: ModelConfig,
@@ -524,6 +547,7 @@ def _select_params(
     random_state: int,
     split_labels: np.ndarray | None = None,
     score_labels: np.ndarray | None = None,
+    decision_thresholds: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     search = model_config.hyperparameter_search
     candidates = _candidate_pool(model_config)
@@ -558,7 +582,20 @@ def _select_params(
                 progress_description=f"candidate {index + 1}/{len(candidates)} fold {fold_index}/{len(splits)}",
             )
             x_val = _transform_with_scaler(x[val_idx], scaler)
-            score = float(scorer(model, x_val, score_y[val_idx]))
+            if (
+                problem_type == "classification"
+                and decision_thresholds
+                and decision_thresholds.get("threshold") is not None
+            ):
+                val_signal = _predict_signal(problem_type, model, x_val)
+                val_pred = _threshold_labels(val_signal, decision_thresholds)
+                score = _score_classification_predictions(
+                    score_y[val_idx],
+                    val_pred,
+                    search.scoring or _default_scoring(problem_type),
+                )
+            else:
+                score = float(scorer(model, x_val, score_y[val_idx]))
             scores.append(score)
             fold_bar.set_postfix(score=f"{score:.4g}")
         mean_score = float(np.mean(scores))
@@ -593,6 +630,82 @@ def _prediction_labels(problem_type: str, prediction: np.ndarray) -> np.ndarray:
         if prediction.ndim > 1 and prediction.shape[1] > 1:
             return np.argmax(prediction, axis=1)
     return np.asarray(prediction).reshape(-1)
+
+
+def _decision_threshold_config(config: PipelineConfig) -> dict[str, Any] | None:
+    data = dict(config.problem.decision_thresholds or {})
+    if not data or not bool(data.get("enabled", False)):
+        return None
+    if "class_index" not in data:
+        raise ValueError("problem.decision_thresholds requires class_index when enabled.")
+    data["class_index"] = int(data["class_index"])
+    if data.get("threshold") is not None:
+        data["threshold"] = float(data["threshold"])
+    data.setdefault("apply", True)
+    return data
+
+
+def _threshold_values(data: dict[str, Any]) -> list[float]:
+    if data.get("thresholds"):
+        return [float(value) for value in data["thresholds"]]
+    start = float(data.get("start", 0.05))
+    stop = float(data.get("stop", 0.95))
+    step = float(data.get("step", 0.05))
+    count = int(round((stop - start) / step)) + 1
+    return [float(round(start + index * step, 10)) for index in range(max(count, 1))]
+
+
+def _threshold_labels(signal: np.ndarray, config: dict[str, Any]) -> np.ndarray:
+    return labels_from_probabilities(signal, config["class_index"], config.get("threshold"))
+
+
+def _save_threshold_analysis(
+    paths: dict[str, Path],
+    train_true,
+    train_signal: np.ndarray,
+    test_true,
+    test_signal: np.ndarray,
+    labels,
+    config: dict[str, Any],
+) -> tuple[dict[str, Path], dict[str, Any]]:
+    class_index = int(config["class_index"])
+    thresholds = _threshold_values(config)
+    rows = []
+    for split, y_true, signal in [
+        ("train", train_true, train_signal),
+        ("test", test_true, test_signal),
+    ]:
+        for row in threshold_curve_metrics(y_true, signal, class_index, thresholds, labels=labels):
+            rows.append({"split": split, **row})
+
+    frame = pd.DataFrame(rows)
+    csv_path = paths["metrics"] / f"decision_thresholds_class_{class_index}.csv"
+    plot_path = paths["metrics"] / f"decision_thresholds_class_{class_index}.jpg"
+    frame.to_csv(csv_path, index=False)
+    save_threshold_curve_plot(rows, plot_path, class_index)
+
+    applied_threshold = config.get("threshold")
+    selected_rows = frame[frame["split"] == "test"]
+    best_test = None
+    if not selected_rows.empty:
+        best_test = selected_rows.sort_values(["f1_macro", "f1_class"], ascending=False).iloc[0].to_dict()
+    return (
+        {
+            "decision_thresholds": csv_path,
+            "decision_threshold_plot": plot_path,
+        },
+        {
+            "enabled": True,
+            "class_index": class_index,
+            "threshold": applied_threshold,
+            "apply": bool(config.get("apply", True)),
+            "csv": str(csv_path),
+            "plot": str(plot_path),
+            "best_test_threshold": None if best_test is None else float(best_test["threshold"]),
+            "best_test_f1_macro": None if best_test is None else float(best_test["f1_macro"]),
+            "best_test_f1_class": None if best_test is None else float(best_test["f1_class"]),
+        },
+    )
 
 
 def _metric_target(problem_type: str, y_target: np.ndarray, y_labels: np.ndarray | None) -> np.ndarray:
@@ -701,6 +814,7 @@ def _save_predictions(
     y_pred,
     signal: np.ndarray | None = None,
     target_probabilities: np.ndarray | None = None,
+    extra_columns: dict[str, Any] | None = None,
 ) -> Path:
     frame = pd.DataFrame(
         {
@@ -716,6 +830,8 @@ def _save_predictions(
     if target_probabilities is not None and np.asarray(target_probabilities).ndim > 1:
         for index in range(target_probabilities.shape[1]):
             frame[f"target_probability_{index}"] = target_probabilities[:, index]
+    for column, values in (extra_columns or {}).items():
+        frame[column] = values
     path.parent.mkdir(parents=True, exist_ok=True)
     frame.to_csv(path, index=False)
     return path
@@ -765,6 +881,7 @@ def train_model(config: PipelineConfig, run_root: str | Path, interactive: bool 
     train_metric_target = _metric_target(problem_type, y_train, label_train)
     test_metric_target = _metric_target(problem_type, y_test, label_test)
     model_y_train = _target_for_model(problem_type, config.model, y_train, label_train)
+    threshold_config = _decision_threshold_config(config) if problem_type == "classification" else None
 
     selected_params, cv_results = _select_params(
         problem_type,
@@ -774,6 +891,7 @@ def train_model(config: PipelineConfig, run_root: str | Path, interactive: bool 
         config.problem.random_state,
         split_labels=label_train if problem_type == "classification" else None,
         score_labels=label_train if problem_type == "classification" else None,
+        decision_thresholds=threshold_config,
     )
     model, scaler = _fit_estimator(
         problem_type,
@@ -789,13 +907,45 @@ def train_model(config: PipelineConfig, run_root: str | Path, interactive: bool 
     x_test_proc = _transform_with_scaler(x_test, scaler)
     train_signal = _predict_signal(problem_type, model, x_train_proc)
     test_signal = _predict_signal(problem_type, model, x_test_proc)
-    train_pred = _prediction_labels(problem_type, train_signal)
-    test_pred = _prediction_labels(problem_type, test_signal)
+    argmax_train_pred = _prediction_labels(problem_type, train_signal)
+    argmax_test_pred = _prediction_labels(problem_type, test_signal)
+    train_pred = argmax_train_pred
+    test_pred = argmax_test_pred
 
+    threshold_report = None
+    threshold_artifacts = {}
+    prediction_rule = "argmax"
+    if (
+        threshold_config
+        and np.asarray(train_signal).ndim > 1
+        and np.asarray(test_signal).ndim > 1
+    ):
+        threshold_artifacts, threshold_report = _save_threshold_analysis(
+            paths,
+            train_metric_target,
+            train_signal,
+            test_metric_target,
+            test_signal,
+            label_values,
+            threshold_config,
+        )
+        artifacts = {}
+        artifacts.update(threshold_artifacts)
+        if threshold_config.get("apply", True) and threshold_config.get("threshold") is not None:
+            train_pred = _threshold_labels(train_signal, threshold_config)
+            test_pred = _threshold_labels(test_signal, threshold_config)
+            prediction_rule = (
+                f"class_{threshold_config['class_index']}_threshold_"
+                f"{threshold_config['threshold']}"
+            )
+    else:
+        artifacts = {}
+
+    argmax_train_metrics = _evaluate(problem_type, train_metric_target, argmax_train_pred, label_values)
+    argmax_test_metrics = _evaluate(problem_type, test_metric_target, argmax_test_pred, label_values)
     train_metrics = _evaluate(problem_type, train_metric_target, train_pred, label_values)
     test_metrics = _evaluate(problem_type, test_metric_target, test_pred, label_values)
 
-    artifacts: dict[str, Path] = {}
     artifacts["model"] = _save_model_artifact(model, paths["models"] / "model.pkl")
     if scaler is not None:
         with (paths["models"] / "scaler.pkl").open("wb") as f:
@@ -828,6 +978,10 @@ def train_model(config: PipelineConfig, run_root: str | Path, interactive: bool 
             "train": _class_distribution(label_train),
             "test": _class_distribution(label_test),
         } if problem_type == "classification" else None,
+        "prediction_rule": prediction_rule,
+        "argmax_train_metrics": argmax_train_metrics,
+        "argmax_test_metrics": argmax_test_metrics,
+        "decision_thresholds": threshold_report,
         "train_metrics": train_metrics,
         "test_metrics": test_metrics,
         "confusion_matrix_plots": {key: str(value) for key, value in plot_artifacts.items()},
@@ -854,5 +1008,9 @@ def train_model(config: PipelineConfig, run_root: str | Path, interactive: bool 
         test_pred,
         signal=test_signal,
         target_probabilities=y_test if problem_type == "classification" else None,
+        extra_columns={
+            "y_pred_argmax": argmax_test_pred,
+            "prediction_rule": prediction_rule,
+        } if problem_type == "classification" else None,
     )
     return artifacts

@@ -34,18 +34,22 @@ def test_pseudonitzschia_configs_are_single_model_experiments():
     ]
     assert optics.problem.class_encoding == "soft_probabilities"
     assert optics.problem.target_transform_offset == 100.0
-    assert optics.problem.test_size == 0.2
+    assert optics.problem.test_size == 0.15
+    assert optics.problem.decision_thresholds["class_index"] == 2
+    assert optics.problem.decision_thresholds["threshold"] == 0.45
 
     assert environment.model.family == "cnn3d"
     assert environment.model.feature_groups == ["nut", "car", "phy"]
-    assert environment.problem.test_size == 0.2
+    assert environment.problem.test_size == 0.15
+    assert environment.problem.decision_thresholds["class_index"] == 2
+    assert environment.problem.decision_thresholds["threshold"] == 0.45
     assert len(environment.products) == 10
     assert environment.products[0].preprocess["derived_variables"][0]["name"] == "din"
     assert environment.products[7].preprocess["exclude_from_log1p"] == ["ph"]
     assert [candidate["name"] for candidate in environment.model.hyperparameter_search.candidates] == [
         "m",
-        "small",
-        "small_regularized",
+        "m_light_regularized",
+        "m_dropout",
     ]
 
     for config in [optics, environment]:
@@ -258,3 +262,64 @@ def test_direct_training_saves_single_model_outputs(tmp_path):
     assert (run_root / "metrics" / "confusion_matrix.jpg").exists()
     assert report["feature_groups"] == ["optics"]
     assert "test_metrics" in report
+
+
+def test_class_threshold_rule_saves_analysis(tmp_path):
+    run_root = tmp_path / "run"
+    datasets_dir = run_root / "datasets"
+    datasets_dir.mkdir(parents=True)
+    ids = np.arange(30)
+    labels = np.tile(np.arange(3), 10)
+    features = np.column_stack(
+        [
+            labels == 0,
+            labels == 1,
+            labels == 2,
+            ids / len(ids),
+        ]
+    ).astype(np.float32)
+
+    xr.DataArray(
+        labels.astype(float).reshape(-1, 1),
+        dims=("Id", "variable"),
+        coords={"Id": ids, "variable": ["target"]},
+    ).to_netcdf(datasets_dir / "target.nc")
+    xr.DataArray(
+        features,
+        dims=("Id", "variable"),
+        coords={"Id": ids, "variable": ["a", "b", "c", "d"]},
+    ).to_netcdf(datasets_dir / "optics.nc")
+
+    config = PipelineConfig(
+        target=TargetConfig(path=str(tmp_path / "unused.csv"), target_column="target"),
+        products=[ProductSpec(name="local", dataset_ids=["local"], feature_group="optics")],
+        problem=ProblemConfig(
+            type="classification",
+            class_intervals=[[-0.5, 0.5], [0.5, 1.5], [1.5, 2.5]],
+            class_encoding="hard",
+            test_size=0.3,
+            random_state=42,
+            decision_thresholds={
+                "enabled": True,
+                "class_index": 2,
+                "threshold": 0.45,
+                "thresholds": [0.3, 0.45, 0.6],
+            },
+        ),
+        model=ModelConfig(
+            family="random_forest",
+            feature_groups=["optics"],
+            params={"n_estimators": 20, "random_state": 42},
+        ),
+    )
+
+    artifacts = train_model(config, run_root)
+    report = json.loads((run_root / "reports" / "training_report.json").read_text())
+    predictions = pd.read_csv(run_root / "metrics" / "predictions.csv")
+
+    assert artifacts["decision_thresholds"] == run_root / "metrics" / "decision_thresholds_class_2.csv"
+    assert artifacts["decision_threshold_plot"] == run_root / "metrics" / "decision_thresholds_class_2.jpg"
+    assert report["prediction_rule"] == "class_2_threshold_0.45"
+    assert report["decision_thresholds"]["threshold"] == 0.45
+    assert "argmax_test_metrics" in report
+    assert "y_pred_argmax" in predictions.columns
