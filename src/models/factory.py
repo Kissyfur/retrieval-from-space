@@ -6,9 +6,17 @@ from src.models.dense import KerasDenseEstimator
 from src.models.tree import random_forest
 
 
+DECISION_PARAM_KEYS = {
+    "decision_class_index",
+    "decision_threshold",
+    "use_decision_threshold",
+}
+
+
 def create_model(problem_type: str, config: ModelConfig, params: dict | None = None):
     family = config.family.lower()
     model_params = {**config.params, **({} if params is None else params)}
+    model_params = {key: value for key, value in model_params.items() if key not in DECISION_PARAM_KEYS}
     if family in {"random_forest", "rf", "auto"}:
         return random_forest(problem_type, **model_params)
     if family in {"cnn3d", "3d_cnn"}:

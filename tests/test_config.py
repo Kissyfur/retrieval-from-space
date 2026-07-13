@@ -35,26 +35,27 @@ def test_pseudonitzschia_configs_are_single_model_experiments():
     assert optics.problem.class_encoding == "soft_probabilities"
     assert optics.problem.target_transform_offset == 100.0
     assert optics.problem.test_size == 0.15
-    assert optics.problem.decision_thresholds["class_index"] == 2
-    assert optics.problem.decision_thresholds["threshold"] == 0.45
 
     assert environment.model.family == "cnn3d"
     assert environment.model.feature_groups == ["nut", "car", "phy"]
     assert environment.problem.test_size == 0.15
-    assert environment.problem.decision_thresholds["class_index"] == 2
-    assert environment.problem.decision_thresholds["threshold"] == 0.45
     assert len(environment.products) == 10
     assert environment.products[0].preprocess["derived_variables"][0]["name"] == "din"
     assert environment.products[7].preprocess["exclude_from_log1p"] == ["ph"]
     assert [candidate["name"] for candidate in environment.model.hyperparameter_search.candidates] == [
         "m",
-        "m_light_regularized",
-        "m_dropout",
+        "m_class2_t035",
+        "m_class2_t040",
+        "m_light_class2_t035",
+        "m_light_class2_t040",
+        "m_dropout_class2_t035",
     ]
 
     for config in [optics, environment]:
         assert not hasattr(config.model, "strategy")
-        assert len(config.model.hyperparameter_search.candidates) == 3
+        assert len(config.model.hyperparameter_search.candidates) == 6
+        assert config.model.hyperparameter_search.candidates[0]["use_decision_threshold"] is False
+        assert config.model.hyperparameter_search.candidates[1]["decision_class_index"] == 2
         assert config.model.sample_weight["mode"] == "balanced"
         assert config.model.augmentation["repetitions"] == 10
 
@@ -264,7 +265,7 @@ def test_direct_training_saves_single_model_outputs(tmp_path):
     assert "test_metrics" in report
 
 
-def test_class_threshold_rule_saves_analysis(tmp_path):
+def test_candidate_threshold_rule_is_applied_without_threshold_study(tmp_path):
     run_root = tmp_path / "run"
     datasets_dir = run_root / "datasets"
     datasets_dir.mkdir(parents=True)
@@ -299,17 +300,16 @@ def test_class_threshold_rule_saves_analysis(tmp_path):
             class_encoding="hard",
             test_size=0.3,
             random_state=42,
-            decision_thresholds={
-                "enabled": True,
-                "class_index": 2,
-                "threshold": 0.45,
-                "thresholds": [0.3, 0.45, 0.6],
-            },
         ),
         model=ModelConfig(
             family="random_forest",
             feature_groups=["optics"],
-            params={"n_estimators": 20, "random_state": 42},
+            params={
+                "n_estimators": 20,
+                "random_state": 42,
+                "decision_class_index": 2,
+                "decision_threshold": 0.45,
+            },
         ),
     )
 
@@ -317,9 +317,10 @@ def test_class_threshold_rule_saves_analysis(tmp_path):
     report = json.loads((run_root / "reports" / "training_report.json").read_text())
     predictions = pd.read_csv(run_root / "metrics" / "predictions.csv")
 
-    assert artifacts["decision_thresholds"] == run_root / "metrics" / "decision_thresholds_class_2.csv"
-    assert artifacts["decision_threshold_plot"] == run_root / "metrics" / "decision_thresholds_class_2.jpg"
     assert report["prediction_rule"] == "class_2_threshold_0.45"
-    assert report["decision_thresholds"]["threshold"] == 0.45
-    assert "argmax_test_metrics" in report
-    assert "y_pred_argmax" in predictions.columns
+    assert report["selected_params"]["decision_threshold"] == 0.45
+    assert "decision_thresholds" not in artifacts
+    assert "decision_thresholds" not in report
+    assert "argmax_test_metrics" not in report
+    assert "y_pred_argmax" not in predictions.columns
+    assert predictions["prediction_rule"].unique().tolist() == ["class_2_threshold_0.45"]
