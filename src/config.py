@@ -31,6 +31,10 @@ def _as_list(value: Any) -> list[Any]:
     return [value]
 
 
+def _as_string_list(value: Any) -> list[str]:
+    return [str(item) for item in _as_list(value)]
+
+
 @dataclass
 class TargetConfig:
     path: str
@@ -229,6 +233,7 @@ class HyperparameterSearchConfig:
 class ModelStageConfig:
     family: str = "random_forest"
     feature_groups: list[str] = field(default_factory=list)
+    input_base_models: list[str] = field(default_factory=list)
     params: dict[str, Any] = field(default_factory=dict)
     standardize: bool = False
     sample_weight: Any = None
@@ -241,6 +246,9 @@ class ModelStageConfig:
         return cls(
             family=str(data.get("family", "random_forest")).lower(),
             feature_groups=[str(v) for v in data.get("feature_groups", [])],
+            input_base_models=_as_string_list(
+                data.get("input_base_models", data.get("base_input_models", []))
+            ),
             params=dict(data.get("params", {})),
             standardize=bool(data.get("standardize", False)),
             sample_weight=data.get("sample_weight", data.get("make_sample_weight")),

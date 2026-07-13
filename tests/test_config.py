@@ -97,15 +97,26 @@ def test_load_pseudonitzschia_cnn_classification_config():
         "nh4_div_no3",
     ]
     assert config.model.base_model is None
-    assert config.model.final_model.family == "dense"
+    assert config.model.final_model.family == "random_forest"
     assert config.model.final_model.feature_groups == ["meta"]
-    assert config.model.final_model.standardize is True
-    assert config.model.final_model.params["hidden_units"] == [32, 16]
-    assert config.model.final_model.sample_weight["mode"] == "balanced"
+    assert config.model.final_model.input_base_models == ["environment"]
+    assert config.model.final_model.standardize is False
+    assert config.model.final_model.params["class_weight"] == "balanced"
     final_search = config.model.final_model.hyperparameter_search
     assert final_search.enabled is True
     assert final_search.cv == 5
-    assert len(final_search.candidates) == 3
+    assert final_search.n_iter == 24
+    assert final_search.random_state == 42
+    assert sorted(final_search.param_distributions) == [
+        "bootstrap",
+        "class_weight",
+        "max_depth",
+        "max_features",
+        "min_samples_leaf",
+        "min_samples_split",
+        "n_estimators",
+        "n_jobs",
+    ]
     assert len(config.model.base_models["optics"].hyperparameter_search.candidates) == 3
     assert len(config.model.base_models["environment"].hyperparameter_search.candidates) == 3
     assert config.products[0].name == "reflectance"
@@ -752,6 +763,7 @@ def test_multi_base_stacking_saves_stage_metrics(tmp_path):
             final_model=ModelStageConfig(
                 family="random_forest",
                 feature_groups=["meta"],
+                input_base_models=["physics"],
                 params={"n_estimators": 3, "random_state": 44},
             ),
         ),
@@ -766,10 +778,12 @@ def test_multi_base_stacking_saves_stage_metrics(tmp_path):
     assert artifacts["base_optics_signals"] == run_root / "metrics" / "base_optics_signals.npz"
     assert artifacts["base_physics_signals"] == run_root / "metrics" / "base_physics_signals.npz"
     assert [stage["name"] for stage in stage_metrics["stages"]] == ["optics", "physics", "final"]
-    assert stage_metrics["stages"][-1]["input_variant"] == "all_base_oof_signals_plus_metadata"
+    assert stage_metrics["stages"][-1]["input_variant"] == "selected_base_oof_signals_plus_metadata"
+    assert stage_metrics["stages"][-1]["input_base_models"] == ["physics"]
+    assert stage_metrics["stages"][-1]["base_prediction_columns"] == ["base_physics_signal"]
     assert "train_oof_metrics" in stage_metrics["stages"][-1]
     assert "train_oof_metrics" in stage_metrics["stages"][0]
-    assert "base_optics_signal" in predictions.columns
+    assert "base_optics_signal" not in predictions.columns
     assert "base_physics_signal" in predictions.columns
 
     (run_root / "metrics" / "final_input_selection_metrics.json").write_text("{}", encoding="utf-8")
@@ -781,7 +795,8 @@ def test_multi_base_stacking_saves_stage_metrics(tmp_path):
     assert not (run_root / "metrics" / "final_input_selection_metrics.json").exists()
     assert not (run_root / "metrics" / "final_ablation_metrics.json").exists()
     assert [stage["name"] for stage in refreshed_stage_metrics["stages"]] == ["optics", "physics", "final"]
-    assert refreshed_stage_metrics["stages"][-1]["input_variant"] == "all_base_oof_signals_plus_metadata"
+    assert refreshed_stage_metrics["stages"][-1]["input_variant"] == "selected_base_oof_signals_plus_metadata"
+    assert refreshed_stage_metrics["stages"][-1]["input_base_models"] == ["physics"]
 
 
 def test_classification_base_stage_saves_confusion_matrix_plots(tmp_path):

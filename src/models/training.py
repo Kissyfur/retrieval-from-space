@@ -858,6 +858,30 @@ def _load_stage_report(paths: dict[str, Path], stage_name: str) -> dict[str, Any
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _select_final_base_signals(
+    final_stage: ModelStageConfig,
+    base_train_signals: list[tuple[str, np.ndarray]],
+    base_test_signals: list[tuple[str, np.ndarray]],
+) -> tuple[list[tuple[str, np.ndarray]], list[tuple[str, np.ndarray]], list[str]]:
+    requested = list(final_stage.input_base_models)
+    if not requested:
+        return base_train_signals, base_test_signals, [name for name, _ in base_train_signals]
+
+    train_by_name = dict(base_train_signals)
+    test_by_name = dict(base_test_signals)
+    missing = [name for name in requested if name not in train_by_name or name not in test_by_name]
+    if missing:
+        raise ValueError(
+            f"final_model.input_base_models contains unknown base model(s): {missing}. "
+            f"Available: {list(train_by_name)}"
+        )
+    return (
+        [(name, train_by_name[name]) for name in requested],
+        [(name, test_by_name[name]) for name in requested],
+        requested,
+    )
+
+
 def _save_common_outputs(
     paths: dict[str, Path],
     problem_type: str,
@@ -1414,9 +1438,14 @@ def _train_final_from_base_signals(
     strategy = config.model.strategy
     if strategy == "residual_correction" and problem_type != "regression":
         raise ValueError("Residual correction is only supported for regression problems.")
-    if strategy == "residual_correction" and len(base_train_signals) != 1:
-        raise ValueError("Residual correction supports exactly one base model.")
     final_stage = config.model.final_model or ModelStageConfig(feature_groups=["meta"])
+    final_base_train_signals, final_base_test_signals, final_input_base_models = _select_final_base_signals(
+        final_stage,
+        base_train_signals,
+        base_test_signals,
+    )
+    if strategy == "residual_correction" and len(final_base_train_signals) != 1:
+        raise ValueError("Residual correction supports exactly one final input base model.")
     x_final_train_meta, final_groups = _load_matrix_for_groups(
         paths["datasets"], split_ids["train"], final_stage.feature_groups, final_stage
     )
@@ -1425,7 +1454,7 @@ def _train_final_from_base_signals(
     )
 
     if strategy == "residual_correction":
-        final_y_train = y_train - base_train_signals[0][1].reshape(-1)
+        final_y_train = y_train - final_base_train_signals[0][1].reshape(-1)
         final_problem_type = "regression"
     else:
         final_problem_type = problem_type
@@ -1438,10 +1467,13 @@ def _train_final_from_base_signals(
         x_final_train_meta,
         x_final_test_meta,
         meta_columns,
-        base_train_signals,
-        base_test_signals,
+        final_base_train_signals,
+        final_base_test_signals,
     )
-    input_variant = "all_base_oof_signals_plus_metadata" if base_train_signals else "metadata_only"
+    if final_base_train_signals and final_stage.input_base_models:
+        input_variant = "selected_base_oof_signals_plus_metadata"
+    else:
+        input_variant = "all_base_oof_signals_plus_metadata" if final_base_train_signals else "metadata_only"
 
     final_params, final_cv_results = _select_params(
         final_problem_type,
@@ -1466,7 +1498,7 @@ def _train_final_from_base_signals(
         stage_name="final",
     )
     if strategy == "residual_correction":
-        final_oof_pred = base_train_signals[0][1].reshape(-1) + final_oof_signal.reshape(-1)
+        final_oof_pred = final_base_train_signals[0][1].reshape(-1) + final_oof_signal.reshape(-1)
     else:
         final_oof_pred = _prediction_labels(final_problem_type, final_oof_signal)
     final_oof_metrics = _evaluate(problem_type, train_metric_target, final_oof_pred, label_values)
@@ -1484,7 +1516,7 @@ def _train_final_from_base_signals(
     final_raw_pred = final_model.predict(x_final_test_proc)
     final_signal = None
     if strategy == "residual_correction":
-        y_pred = base_test_signals[0][1].reshape(-1) + final_raw_pred
+        y_pred = final_base_test_signals[0][1].reshape(-1) + final_raw_pred
     elif problem_type == "classification":
         final_signal = _predict_signal(problem_type, final_model, x_final_test_proc)
         y_pred = _classification_prediction_from_signal(final_signal)
@@ -1493,7 +1525,7 @@ def _train_final_from_base_signals(
 
     x_final_train_proc = _transform_with_scaler(x_final_train, final_scaler)
     if strategy == "residual_correction":
-        final_train_pred = base_train_signals[0][1].reshape(-1) + final_model.predict(x_final_train_proc)
+        final_train_pred = final_base_train_signals[0][1].reshape(-1) + final_model.predict(x_final_train_proc)
     elif problem_type == "classification":
         final_train_signal = _predict_signal(problem_type, final_model, x_final_train_proc)
         final_train_pred = _classification_prediction_from_signal(final_train_signal)
@@ -1520,7 +1552,7 @@ def _train_final_from_base_signals(
     )
     artifacts["model"] = artifacts["final_model"]
     extra_prediction_columns = {}
-    for base_name, base_test_signal in base_test_signals:
+    for base_name, base_test_signal in final_base_test_signals:
         column_name = f"base_{_stage_slug(base_name)}_signal"
         extra_prediction_columns[column_name] = base_test_signal
     if problem_type == "classification" and strategy != "residual_correction":
@@ -1536,6 +1568,7 @@ def _train_final_from_base_signals(
         "input_variant": input_variant,
         "input_feature_count": int(x_final_train.shape[1]),
         "input_feature_columns": final_feature_columns,
+        "input_base_models": final_input_base_models,
         "base_prediction_columns": base_prediction_columns,
         "selected_params": final_params,
         "cv_results": final_cv_results,
@@ -1564,6 +1597,7 @@ def _train_final_from_base_signals(
             "input_variant": input_variant,
             "input_feature_count": int(x_final_train.shape[1]),
             "input_feature_columns": final_feature_columns,
+            "input_base_models": final_input_base_models,
             "base_prediction_columns": base_prediction_columns,
         },
         "stages": list(base_reports) + [final_report],
@@ -1590,6 +1624,7 @@ def _train_final_from_base_signals(
                 "final_selected_params": final_params,
                 "final_input_variant": input_variant,
                 "final_input_feature_columns": final_feature_columns,
+                "final_input_base_models": final_input_base_models,
                 "base_prediction_columns": base_prediction_columns,
                 "class_distribution": split_distribution,
                 "class_encoding": config.problem.class_encoding,
