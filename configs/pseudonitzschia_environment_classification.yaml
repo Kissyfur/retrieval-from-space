@@ -1,0 +1,272 @@
+run_name: pseudonitzschia_environment_classification_from_space
+run_version: v1
+output_root: outputs/runs
+
+target:
+  path: data/pseudonitzschia_targets.csv
+  id_column: Id
+  lat_column: lat
+  lon_column: lon
+  time_column: time
+  target_column: ps_counts
+  metadata_columns: [tem, sal, o_perc, o, ph, lat, lon]
+  include_spatial_metadata: false
+  include_day_metadata: false
+  include_cyclic_day_metadata: true
+
+problem:
+  type: classification
+  target_transform: log
+  target_transform_offset: 100.0
+  class_intervals:
+    - [4.605170185988092, 6.907755278982137]
+    - [6.907755278982137, 11.512925464970229]
+    - [11.512925464970229, 16.52356742571093]
+  class_labels: [low, medium, high]
+  class_encoding: soft_probabilities
+  soft_label_temperature: 1.0
+  soft_label_prior: 0.05
+  test_size: 0.15
+  random_state: 42
+
+matchup:
+  lat_window: 0.06
+  lon_window: 0.06
+  time_window_days: 14
+  lat_threshold: 0.1
+  lon_threshold: 0.1
+  time_threshold_days: 1
+  require_full_time_window: false
+
+preprocess:
+  positive_quantile:
+  log_products: false
+  add_cloud_land_masks: false
+  fillna: 0.0
+  min_valid_ratio:
+  time_limit: 16
+  prefix_variables: false
+
+model:
+  family: cnn3d
+  feature_groups: [nut, car, phy]
+  standardize: true
+  params:
+    output_dim: 3
+    loss: categorical_crossentropy
+    final_activation: softmax
+    seed: 42
+    metrics: [accuracy]
+    batch_size: 64
+    patience: 3
+    validation_split: 0.15
+  sample_weight:
+    mode: balanced
+    class_boost: [1.0, 1.0, 1.0]
+  augmentation:
+    enabled: true
+    repetitions: 10
+    seed: 42
+    noise_std:
+      nut: [0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.0, 0.20, 0.20]
+      car: [0.20, 0.20, 0.20, 0.0, 0.20, 0.20, 0.20, 0.20]
+      phy: [0.20, 0.20, 0.0, 0.20, 0.20, 0.20, 0.20, 0.20]
+  hyperparameter_search:
+    enabled: true
+    cv: 3
+    scoring: f1_macro
+    candidates:
+      - dims: [16, 8, 4, 4]
+        kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [5, 5, 15]]
+        output_dim: 3
+        dropout: 0.2
+        reg_factor: 0.0005
+        learning_rate: 0.0001
+        name: m_dropout
+        metrics: [accuracy]
+      - dims: [32, 16, 8, 4]
+        kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [5, 5, 15]]
+        output_dim: 3
+        dropout: 0.1
+        reg_factor: 0.0005
+        learning_rate: 0.00005
+        name: wider_slow
+        metrics: [accuracy]
+      - dims: [16, 8, 4, 4]
+        kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [5, 5, 15]]
+        output_dim: 3
+        dropout: 0.0
+        reg_factor: 0.0001
+        learning_rate: 0.0001
+        name: m
+        metrics: [accuracy]
+
+products:
+  - name: nutrients
+    dataset_ids:
+      - cmems_mod_med_bgc-nut_my_4.2km_P1D-m
+      - cmems_mod_med_bgc-nut_anfc_4.2km_P1D-m
+    feature_group: nut
+    variables: [nh4, no3, po4]
+    matchup: &modeled_matchup
+      lat_window: 0.1
+      lon_window: 0.1
+      time_window_days: 14
+      lat_threshold: 10
+      lon_threshold: 10
+      time_threshold_days: 1
+      require_full_time_window: true
+    preprocess:
+      time_limit: 16
+      interpolate_dims: [lat, lon, time]
+      positive_quantile:
+      derived_variables:
+        - name: din
+          expression: no3 + nh4
+        - name: n_div_p
+          expression: no3 / po4
+        - name: din_div_p
+          expression: (no3 + nh4) / po4
+        - name: nh4_div_no3
+          expression: nh4 / no3
+      derived_variables_epsilon: 0.001
+      log1p: true
+      add_cloud_land_masks: true
+      mask_kinds: [land_mask]
+      fillna: 0.0
+
+  - name: modeled_plankton
+    dataset_id: cmems_mod_med_bgc-plankton_my_4.2km_P1D-m
+    feature_group: nut
+    variables: [chl, phyc]
+    matchup: *modeled_matchup
+    preprocess:
+      time_limit: 16
+      interpolate_dims: [lat, lon, time]
+      positive_quantile:
+      log: false
+      add_cloud_land_masks: false
+      fillna: 0.0
+
+  - name: temperature
+    dataset_ids:
+      - cmems_mod_med_phy-temp_my_4.2km_P1D-m
+      - cmems_mod_med_phy-tem_anfc_4.2km_P1D-m
+    feature_group: phy
+    variables: [bottomT, thetao]
+    matchup: *modeled_matchup
+    preprocess:
+      time_limit: 16
+      interpolate_dims: [lat, lon, time]
+      positive_quantile:
+      log: false
+      add_cloud_land_masks: true
+      mask_kinds: [land_mask]
+      fillna: 0.0
+
+  - name: salinity
+    dataset_ids:
+      - cmems_mod_med_phy-sal_my_4.2km_P1D-m
+      - cmems_mod_med_phy-sal_anfc_4.2km_P1D-m
+    feature_group: phy
+    variables: [so]
+    matchup: *modeled_matchup
+    preprocess:
+      time_limit: 16
+      positive_quantile:
+      interpolate_dims: [lat, lon, time]
+      log: false
+      add_cloud_land_masks: false
+      fillna: 0.0
+
+  - name: currents
+    dataset_ids:
+      - cmems_mod_med_phy-cur_my_4.2km_P1D-m
+      - cmems_mod_med_phy-cur_anfc_4.2km_P1D-m
+    feature_group: phy
+    variables: [uo, vo]
+    matchup: *modeled_matchup
+    preprocess:
+      time_limit: 16
+      interpolate_dims: [lat, lon, time]
+      positive_quantile:
+      log: false
+      add_cloud_land_masks: false
+      fillna: 0.0
+
+  - name: sea_level
+    dataset_ids:
+      - cmems_mod_med_phy-ssh_my_4.2km_P1D-m
+      - cmems_mod_med_phy-ssh_anfc_4.2km_P1D-m
+    feature_group: phy
+    variables: [zos]
+    matchup: *modeled_matchup
+    preprocess:
+      time_limit: 16
+      interpolate_dims: [lat, lon, time]
+      positive_quantile:
+      log: false
+      add_cloud_land_masks: false
+      fillna: 0.0
+
+  - name: mixed_layer_depth
+    dataset_ids:
+      - cmems_mod_med_phy-mld_my_4.2km_P1D-m
+      - cmems_mod_med_phy-mld_anfc_4.2km_P1D-m
+    feature_group: phy
+    variables: [mlotst]
+    matchup: *modeled_matchup
+    preprocess:
+      time_limit: 16
+      interpolate_dims: [lat, lon, time]
+      positive_quantile:
+      log1p: true
+      add_cloud_land_masks: false
+      fillna: 0.0
+
+  - name: carbon
+    dataset_ids:
+      - cmems_mod_med_bgc-car_my_4.2km_P1D-m
+      - cmems_mod_med_bgc-car_anfc_4.2km_P1D-m
+    feature_group: car
+    variables: [dissic, ph, talk]
+    matchup: *modeled_matchup
+    preprocess:
+      time_limit: 16
+      interpolate_dims: [lat, lon, time]
+      positive_quantile:
+      log1p: true
+      exclude_from_log1p: [ph]
+      add_cloud_land_masks: true
+      mask_kinds: [land_mask]
+      fillna: 0.0
+
+  - name: carbon_dioxide
+    dataset_ids:
+      - cmems_mod_med_bgc-co2_my_4.2km_P1D-m
+      - cmems_mod_med_bgc-co2_anfc_4.2km_P1D-m
+    feature_group: car
+    variables: [fpco2, spco2]
+    matchup: *modeled_matchup
+    preprocess:
+      time_limit: 16
+      interpolate_dims: [lat, lon, time]
+      positive_quantile:
+      log1p: true
+      add_cloud_land_masks: false
+      fillna: 0.0
+
+  - name: biology
+    dataset_ids:
+      - cmems_mod_med_bgc-bio_my_4.2km_P1D-m
+      - cmems_mod_med_bgc-bio_anfc_4.2km_P1D-m
+    feature_group: car
+    variables: [nppv, o2]
+    matchup: *modeled_matchup
+    preprocess:
+      time_limit: 16
+      interpolate_dims: [lat, lon, time]
+      positive_quantile:
+      log1p: true
+      add_cloud_land_masks: false
+      fillna: 0.0

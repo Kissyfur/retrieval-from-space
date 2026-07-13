@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from src.config import ModelStageConfig
+from src.config import ModelConfig
 from src.models.cnn import KerasCNN3DEstimator
 from src.models.dense import KerasDenseEstimator
 from src.models.tree import random_forest
 
 
-def create_model(problem_type: str, config: ModelStageConfig, params: dict | None = None):
+def create_model(problem_type: str, config: ModelConfig, params: dict | None = None):
     family = config.family.lower()
     model_params = {**config.params, **({} if params is None else params)}
     if family in {"random_forest", "rf", "auto"}:

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from src.config import PipelineConfig
 from src.logging import setup_logger
-from src.models.training import train_base_models, train_final_model, train_model
+from src.models.training import train_model
 from src.paths import RunPaths
 from src.state import PipelineState
 
@@ -14,21 +14,11 @@ def train(
     paths: RunPaths,
     state: PipelineState,
     interactive: bool = False,
-    stage: str = "all",
-    base_names: list[str] | None = None,
 ) -> dict[str, Path]:
     logger = setup_logger("src.train", paths.logs / "train.log")
-    state_name = "train" if stage == "all" else f"train_{stage}"
-    state.mark(state_name, "running")
-    if stage == "all":
-        artifacts = train_model(config, paths.root, interactive=interactive)
-    elif stage == "base":
-        artifacts = train_base_models(config, paths.root, base_names=base_names, interactive=interactive)
-    elif stage == "final":
-        artifacts = train_final_model(config, paths.root, interactive=interactive)
-    else:
-        raise ValueError("stage must be 'all', 'base', or 'final'.")
+    state.mark("train", "running")
+    artifacts = train_model(config, paths.root, interactive=interactive)
     for name, path in artifacts.items():
         logger.info("Saved %s: %s", name, path)
-    state.mark(state_name, "complete", {k: str(v) for k, v in artifacts.items()})
+    state.mark("train", "complete", {key: str(value) for key, value in artifacts.items()})
     return artifacts

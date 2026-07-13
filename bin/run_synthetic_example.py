@@ -26,13 +26,13 @@ def _assert_outputs(run_root: Path) -> None:
         run_root / "datasets" / "meta.nc",
         run_root / "datasets" / "optics.nc",
         run_root / "datasets" / "phy.nc",
-        run_root / "models" / "base" / "model.pkl",
-        run_root / "models" / "base" / "selection.json",
-        run_root / "models" / "final" / "model.pkl",
-        run_root / "models" / "final" / "selection.json",
+        run_root / "models" / "model.pkl",
+        run_root / "models" / "selection.json",
         run_root / "metrics" / "metrics.json",
+        run_root / "metrics" / "training_metrics.json",
         run_root / "metrics" / "predictions.csv",
         run_root / "reports" / "summary.md",
+        run_root / "reports" / "training_report.json",
     ]
     missing = [path for path in expected if not path.exists()]
     if missing:

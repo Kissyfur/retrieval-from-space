@@ -33,7 +33,6 @@ preprocess:
   prefix_variables: false
 
 model:
-  strategy: direct
   family: random_forest
   feature_groups: []
   standardize: false

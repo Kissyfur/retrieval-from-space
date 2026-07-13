@@ -31,10 +31,6 @@ def _as_list(value: Any) -> list[Any]:
     return [value]
 
 
-def _as_string_list(value: Any) -> list[str]:
-    return [str(item) for item in _as_list(value)]
-
-
 @dataclass
 class TargetConfig:
     path: str
@@ -59,7 +55,7 @@ class TargetConfig:
             lon_column=str(data.get("lon_column", "lon")),
             time_column=str(data.get("time_column", "time")),
             sheet_name=data.get("sheet_name"),
-            metadata_columns=list(data.get("metadata_columns", [])),
+            metadata_columns=[str(v) for v in data.get("metadata_columns", [])],
             include_spatial_metadata=bool(data.get("include_spatial_metadata", True)),
             include_day_metadata=bool(data.get("include_day_metadata", True)),
             include_cyclic_day_metadata=bool(data.get("include_cyclic_day_metadata", True)),
@@ -230,10 +226,9 @@ class HyperparameterSearchConfig:
 
 
 @dataclass
-class ModelStageConfig:
+class ModelConfig:
     family: str = "random_forest"
     feature_groups: list[str] = field(default_factory=list)
-    input_base_models: list[str] = field(default_factory=list)
     params: dict[str, Any] = field(default_factory=dict)
     standardize: bool = False
     sample_weight: Any = None
@@ -241,51 +236,24 @@ class ModelStageConfig:
     hyperparameter_search: HyperparameterSearchConfig = field(default_factory=HyperparameterSearchConfig)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any] | None) -> "ModelStageConfig":
-        data = {} if data is None else data
-        return cls(
-            family=str(data.get("family", "random_forest")).lower(),
-            feature_groups=[str(v) for v in data.get("feature_groups", [])],
-            input_base_models=_as_string_list(
-                data.get("input_base_models", data.get("base_input_models", []))
-            ),
-            params=dict(data.get("params", {})),
-            standardize=bool(data.get("standardize", False)),
-            sample_weight=data.get("sample_weight", data.get("make_sample_weight")),
-            augmentation=dict(data.get("augmentation", {})),
-            hyperparameter_search=HyperparameterSearchConfig.from_dict(data.get("hyperparameter_search")),
-        )
-
-
-def _model_stage_mapping_from_dict(data: Any) -> dict[str, ModelStageConfig]:
-    if not data:
-        return {}
-    if isinstance(data, dict):
-        return {str(name): ModelStageConfig.from_dict(stage) for name, stage in data.items()}
-    if isinstance(data, list):
-        stages = {}
-        for index, raw_stage in enumerate(data):
-            stage_data = dict(raw_stage)
-            name = str(stage_data.pop("name", f"base_{index + 1}"))
-            stages[name] = ModelStageConfig.from_dict(stage_data)
-        return stages
-    raise ValueError("model.base_models must be a mapping or a list of named stages.")
-
-
-@dataclass
-class ModelConfig(ModelStageConfig):
-    strategy: str = "direct"
-    include_base_prediction: bool = True
-    base_model: ModelStageConfig | None = None
-    base_models: dict[str, ModelStageConfig] = field(default_factory=dict)
-    final_model: ModelStageConfig | None = None
-
-    @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "ModelConfig":
         data = {} if data is None else data
-        strategy = str(data.get("strategy", "direct")).lower()
-        if strategy not in {"direct", "stacking", "residual_correction"}:
-            raise ValueError("model.strategy must be 'direct', 'stacking', or 'residual_correction'.")
+        allowed_keys = {
+            "family",
+            "feature_groups",
+            "params",
+            "standardize",
+            "sample_weight",
+            "make_sample_weight",
+            "augmentation",
+            "hyperparameter_search",
+        }
+        unexpected = sorted(set(data) - allowed_keys)
+        if unexpected:
+            raise ValueError(
+                "The model config supports one direct model. "
+                f"Remove unsupported key(s): {unexpected}"
+            )
         return cls(
             family=str(data.get("family", "random_forest")).lower(),
             feature_groups=[str(v) for v in data.get("feature_groups", [])],
@@ -294,11 +262,6 @@ class ModelConfig(ModelStageConfig):
             sample_weight=data.get("sample_weight", data.get("make_sample_weight")),
             augmentation=dict(data.get("augmentation", {})),
             hyperparameter_search=HyperparameterSearchConfig.from_dict(data.get("hyperparameter_search")),
-            strategy=strategy,
-            include_base_prediction=bool(data.get("include_base_prediction", True)),
-            base_model=ModelStageConfig.from_dict(data["base_model"]) if data.get("base_model") else None,
-            base_models=_model_stage_mapping_from_dict(data.get("base_models")),
-            final_model=ModelStageConfig.from_dict(data["final_model"]) if data.get("final_model") else None,
         )
 
 

@@ -36,7 +36,6 @@ preprocess:
   fillna: 0.0
 
 model:
-  strategy: direct
   family: random_forest
   feature_groups: [meta, optics]
   params:

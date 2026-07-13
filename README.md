@@ -101,10 +101,10 @@ soft_label_prior: 1.0
 ```
 
 The hard class labels are still used for stratified splits and classification
-metrics. See `configs/pseudonitzschia_cnn_classification.yaml` for the CNN
-classification setup copied from the previous notebook. When using a target
-offset, class intervals must be defined in the same transformed space, for
-example boundaries such as `log(100)`, `log(1000)`, and `log(100000)`.
+metrics. The Pseudo-nitzschia examples are split into optics-only and
+environment-only CNN configs. When using a target offset, class intervals must
+be defined in the same transformed space, for example boundaries such as
+`log(100)`, `log(1000)`, and `log(100000)`.
 
 ## Configuration
 
@@ -113,7 +113,8 @@ See:
 - `configs/example_regression.yaml`
 - `configs/example_classification.yaml`
 - `configs/synthetic_end_to_end.yaml`
-- `configs/pseudonitzschia_cnn_classification.yaml`
+- `configs/pseudonitzschia_optics_classification.yaml`
+- `configs/pseudonitzschia_environment_classification.yaml`
 - `configs/products/mediterranean_products.yaml`
 
 Products are configured by `dataset_id` or fallback `dataset_ids`, variables, feature group, and preprocessing options. Local products are copied into `raw/`. Remote Copernicus products are not materialized as full raw NetCDF files; the run stores a small `raw/<product>.remote.json` marker, then the matchup stage opens Copernicus lazily and saves only the target-centered time/lat/lon windows under `processed/matchups/`.
@@ -144,69 +145,30 @@ preprocess:
   mask_kinds: [land_mask]
 ```
 
-## Training Strategies
+## Training
 
-The default strategy is `direct`: one model uses the configured feature groups and predicts the target.
+Training fits one model from the configured feature groups and predicts the
+target.
 
 ```yaml
 model:
-  strategy: direct
   family: random_forest
   feature_groups: [optics, phy, meta]
 ```
 
-For late fusion, use `stacking`. The base model is trained on Copernicus feature groups. Out-of-fold base predictions are then combined with metadata features to train the final model, avoiding leakage from fitting and predicting on the same rows.
-
-```yaml
-target:
-  metadata_columns: [tem, sal, o_perc, o, ph]
-  include_spatial_metadata: false
-  include_day_metadata: false
-  include_cyclic_day_metadata: true
-
-model:
-  strategy: stacking
-  include_base_prediction: true
-  base_model:
-    family: cnn3d
-    feature_groups: [optics]
-  final_model:
-    family: random_forest
-    feature_groups: [meta]
-```
-
 The `meta` dataset computes cyclic day-of-year features as `x_day` and `y_day`
 from the target `time` column, then appends the configured metadata columns.
-
-Stacked training can be run in separate steps. First train the base models; this
-saves out-of-fold train signals and fitted test signals under the run's
-`metrics/` folder:
-
-```bash
-python bin/train_model.py --config configs/pseudonitzschia_cnn_classification.yaml --run-id <run_id> --stage base
-```
-
-Then train only the final model. This loads the saved base signals, stacks them
-with `meta.nc`, and fits the configured final model:
+Use `feature_groups` to decide which prepared NetCDF datasets become model
+inputs. For example, the Pseudo-nitzschia configs train two separate CNN
+experiments:
 
 ```bash
-python bin/train_model.py --config configs/pseudonitzschia_cnn_classification.yaml --run-id <run_id> --stage final
+python bin/run_pipeline.py --config configs/pseudonitzschia_optics_classification.yaml
+python bin/run_pipeline.py --config configs/pseudonitzschia_environment_classification.yaml
 ```
 
-For regression, `residual_correction` trains the final model to predict `target - base_prediction`, then adds that correction back to the base prediction.
-
-```yaml
-model:
-  strategy: residual_correction
-  base_model:
-    family: random_forest
-    feature_groups: [optics, phy]
-  final_model:
-    family: random_forest
-    feature_groups: [meta]
-```
-
-Each model stage can search a candidate pool with cross-validation. Scoring uses scikit-learn scorer names, where higher is better.
+Each model can search a candidate pool with cross-validation. Scoring uses
+scikit-learn scorer names, where higher is better.
 
 ```yaml
 hyperparameter_search:

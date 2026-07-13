@@ -1,0 +1,149 @@
+run_name: pseudonitzschia_optics_classification_from_space
+run_version: v1
+output_root: outputs/runs
+
+target:
+  path: data/pseudonitzschia_targets.csv
+  id_column: Id
+  lat_column: lat
+  lon_column: lon
+  time_column: time
+  target_column: ps_counts
+  metadata_columns: [tem, sal, o_perc, o, ph, lat, lon]
+  include_spatial_metadata: false
+  include_day_metadata: false
+  include_cyclic_day_metadata: true
+
+problem:
+  type: classification
+  target_transform: log
+  target_transform_offset: 100.0
+  class_intervals:
+    - [4.605170185988092, 6.907755278982137]
+    - [6.907755278982137, 11.512925464970229]
+    - [11.512925464970229, 16.52356742571093]
+  class_labels: [low, medium, high]
+  class_encoding: soft_probabilities
+  soft_label_temperature: 1.0
+  soft_label_prior: 0.05
+  test_size: 0.15
+  random_state: 42
+
+matchup:
+  lat_window: 0.06
+  lon_window: 0.06
+  time_window_days: 14
+  lat_threshold: 0.1
+  lon_threshold: 0.1
+  time_threshold_days: 1
+  require_full_time_window: false
+
+preprocess:
+  positive_quantile:
+  log_products: false
+  add_cloud_land_masks: false
+  fillna: 0.0
+  min_valid_ratio:
+  time_limit: 16
+  prefix_variables: false
+
+model:
+  family: cnn3d
+  feature_groups: [optics]
+  standardize: true
+  params:
+    output_dim: 3
+    loss: categorical_crossentropy
+    final_activation: softmax
+    seed: 42
+    metrics: [accuracy]
+    batch_size: 64
+    patience: 3
+    validation_split: 0.15
+  sample_weight:
+    mode: balanced
+    class_boost: [1.0, 1.0, 1.0]
+  augmentation:
+    enabled: true
+    repetitions: 10
+    seed: 42
+    noise_std:
+      optics: [0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.0, 0.0]
+  hyperparameter_search:
+    enabled: true
+    cv: 3
+    scoring: f1_macro
+    candidates:
+      - dims: [4, 4, 4, 4]
+        kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [7, 7, 15]]
+        output_dim: 3
+        dropout: 0.2
+        reg_factor: 0.0005
+        learning_rate: 0.0001
+        name: m_dropout
+        metrics: [accuracy]
+      - dims: [4, 4, 4, 4]
+        kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [7, 7, 15]]
+        output_dim: 3
+        dropout: 0.0
+        reg_factor: 0.001
+        learning_rate: 0.0001
+        name: m
+        metrics: [accuracy]
+      - dims: [4, 4, 4]
+        kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [5, 5, 15]]
+        output_dim: 3
+        dropout: 0.0
+        reg_factor: 0.001
+        learning_rate: 0.0001
+        name: s
+        metrics: [accuracy]
+
+products:
+  - name: reflectance
+    dataset_id: cmems_obs-oc_med_bgc-reflectance_my_l3-multi-1km_P1D
+    feature_group: optics
+    variables: [RRS412, RRS443, RRS490, RRS510, RRS555, RRS670]
+    rename_variables:
+      RRS412: "412"
+      RRS443: "442"
+      RRS490: "490"
+      RRS510: "510"
+      RRS555: "560"
+      RRS670: "673"
+    preprocess:
+      time_limit: 16
+      interpolate_dims: [lat, lon, time]
+      positive_quantile: 0.01
+      positive_quantile_dims: [time, lat, lon]
+      log: true
+      add_cloud_land_masks: true
+      mask_kinds: [cloud_mask, land_mask]
+      min_valid_ratio: 0.3
+      fillna: 0.0
+
+  - name: inherent_optics
+    dataset_id: cmems_obs-oc_med_bgc-optics_my_l3-multi-1km_P1D
+    feature_group: optics
+    variables: [ADG443, APH443, BBP443]
+    preprocess:
+      time_limit: 16
+      interpolate_dims: [lat, lon, time]
+      positive_quantile: 0.01
+      positive_quantile_dims: [time, lat, lon]
+      log: true
+      add_cloud_land_masks: false
+      fillna: 0.0
+
+  - name: plankton_l3
+    dataset_id: cmems_obs-oc_med_bgc-plankton_my_l3-multi-1km_P1D
+    feature_group: optics
+    variables: [CHL, DIATO]
+    preprocess:
+      time_limit: 16
+      interpolate_dims: [lat, lon, time]
+      positive_quantile: 0.01
+      positive_quantile_dims: [time, lat, lon]
+      log: true
+      add_cloud_land_masks: false
+      fillna: 0.0
