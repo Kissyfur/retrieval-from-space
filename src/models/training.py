@@ -209,6 +209,77 @@ def _mask_channel_indices(channel_names: list[str]) -> list[int]:
     ]
 
 
+def _product_group_name(product) -> str:
+    return product.feature_group or product.preprocess.get("feature_group") or product.name
+
+
+def _product_channel_specs(product, config: PipelineConfig) -> list[tuple[str, str]]:
+    names = [product.rename_variables.get(var, var) for var in product.variables]
+    names.extend(spec["name"] for spec in _derived_variable_specs_from_mapping(product.preprocess))
+    log_excluded = {str(value) for value in _as_list_for_training(product.preprocess.get("exclude_from_log"))}
+    log1p_excluded = {str(value) for value in _as_list_for_training(product.preprocess.get("exclude_from_log1p"))}
+    use_log = bool(product.preprocess.get("log", config.preprocess.log_products))
+    use_log1p = bool(product.preprocess.get("log1p", False))
+    prefix_variables = bool(product.preprocess.get("prefix_variables", config.preprocess.prefix_variables))
+
+    specs = []
+    for name in names:
+        transform = "none"
+        if use_log and name not in log_excluded:
+            transform = "log"
+        if use_log1p and name not in log1p_excluded:
+            transform = "log1p"
+        output_name = f"{product.name}:{name}" if prefix_variables else str(name)
+        specs.append((output_name, transform))
+
+    add_masks = bool(product.preprocess.get("add_cloud_land_masks", config.preprocess.add_cloud_land_masks))
+    if add_masks:
+        mask_kinds = {
+            str(value)
+            for value in _as_list_for_training(product.preprocess.get("mask_kinds", ["cloud_mask", "land_mask"]))
+        }
+        if "cloud_mask" in mask_kinds:
+            specs.append(("cloud_mask", "mask"))
+        if "land_mask" in mask_kinds:
+            specs.append(("land_mask", "mask"))
+    return specs
+
+
+def _as_list_for_training(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def _derived_variable_specs_from_mapping(preprocess: dict[str, Any]) -> list[dict[str, str]]:
+    raw = _as_list_for_training(preprocess.get("derived_variables"))
+    specs = []
+    for item in raw:
+        if isinstance(item, dict) and item.get("name"):
+            specs.append({"name": str(item["name"]), "expression": str(item.get("expression", ""))})
+    return specs
+
+
+def _channel_noise_transforms(config: PipelineConfig, group_names: list[str], channel_names: list[str]) -> list[str]:
+    transforms = []
+    for group_name in group_names:
+        seen_masks = set()
+        for product in config.products:
+            if _product_group_name(product) != group_name:
+                continue
+            for name, transform in _product_channel_specs(product, config):
+                if transform == "mask":
+                    if name in seen_masks:
+                        continue
+                    seen_masks.add(name)
+                transforms.append(transform)
+    if len(transforms) != len(channel_names):
+        return ["mask" if index in _mask_channel_indices(channel_names) else "none" for index in range(len(channel_names))]
+    return transforms
+
+
 def _prepare_model_target(
     config: PipelineConfig,
     problem_type: str,
@@ -445,6 +516,38 @@ def _zero_mask_noise(noise_std: np.ndarray | float, mask_channel_indices: list[i
     return adjusted
 
 
+def _noise_for_channel(noise_std: np.ndarray | float, channel: int) -> float:
+    if np.isscalar(noise_std):
+        return float(noise_std)
+    return float(np.asarray(noise_std).reshape(-1)[channel])
+
+
+def _apply_feature_noise(
+    x: np.ndarray,
+    rng: np.random.Generator,
+    noise_std: np.ndarray | float,
+    channel_noise_transforms: list[str] | None,
+) -> np.ndarray:
+    transforms = channel_noise_transforms or ["none"] * x.shape[-1]
+    if len(transforms) != x.shape[-1]:
+        transforms = ["none"] * x.shape[-1]
+    x_aug = x.astype(np.float32, copy=True)
+    for channel, transform in enumerate(transforms):
+        std = _noise_for_channel(noise_std, channel)
+        if std == 0.0 or transform == "mask":
+            continue
+        values = x_aug[..., channel]
+        if transform == "log":
+            x_aug[..., channel] = values + rng.normal(0.0, std, size=values.shape)
+        elif transform == "log1p":
+            raw = np.maximum(np.expm1(values), 0.0)
+            raw = raw * np.exp(rng.normal(0.0, std, size=values.shape))
+            x_aug[..., channel] = np.log1p(raw)
+        else:
+            x_aug[..., channel] = values + rng.normal(0.0, std * np.abs(values), size=values.shape)
+    return x_aug
+
+
 def _augment_training_data(
     x: np.ndarray,
     y: np.ndarray,
@@ -453,6 +556,7 @@ def _augment_training_data(
     model_config: ModelConfig,
     random_state: int,
     mask_channel_indices: list[int] | None = None,
+    channel_noise_transforms: list[str] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None, dict[str, Any]]:
     config = model_config.augmentation
     if not config or not bool(config.get("enabled", config.get("augment", False))):
@@ -470,7 +574,7 @@ def _augment_training_data(
         noise_std = _zero_mask_noise(noise_std, mask_channel_indices)
         noise_info = {**noise_info, "mask_channels_without_noise": mask_channel_indices}
     if np.any(np.asarray(noise_std) != 0):
-        x_aug = x_aug + rng.normal(0.0, noise_std, size=x_aug.shape)
+        x_aug = _apply_feature_noise(x_aug, rng, noise_std, channel_noise_transforms)
     if mask_channel_indices:
         x_aug[..., mask_channel_indices] = np.repeat(x, repetitions, axis=0)[..., mask_channel_indices]
     y_aug = np.repeat(y, repetitions, axis=0)
@@ -489,6 +593,7 @@ def _augment_training_data(
         "repetitions": repetitions,
         "noise_std": config.get("noise_std", config.get("std", config.get("std_x", 0.0))),
         "noise_std_info": noise_info,
+        "noise_semantics": "pre_standardization_log_space_or_relative",
     }
 
 
@@ -561,20 +666,22 @@ def _fit_estimator(
     random_state: int = 42,
     progress_description: str | None = None,
     mask_channel_indices: list[int] | None = None,
+    channel_noise_transforms: list[str] | None = None,
 ):
     _validate_target_compatibility(problem_type, model_config, y)
     sample_weight, sample_weight_info = _make_sample_weights(problem_type, model_config, y_labels)
-    _, scaler = _fit_scaler_if_needed(x, model_config, mask_channel_indices=mask_channel_indices)
-    x_proc = _transform_with_scaler(x, scaler, model_config)
-    x_fit, y_fit, labels_fit, sample_weight_fit, augmentation_info = _augment_training_data(
-        x_proc,
+    x_fit_raw, y_fit, labels_fit, sample_weight_fit, augmentation_info = _augment_training_data(
+        x,
         y,
         y_labels,
         sample_weight,
         model_config,
         random_state,
         mask_channel_indices=mask_channel_indices,
+        channel_noise_transforms=channel_noise_transforms,
     )
+    _, scaler = _fit_scaler_if_needed(x, model_config, mask_channel_indices=mask_channel_indices)
+    x_fit = _transform_with_scaler(x_fit_raw, scaler, model_config)
     fit_params = dict(params)
     if progress_description and _model_uses_keras(model_config):
         fit_params.setdefault("progress_description", progress_description)
@@ -635,6 +742,7 @@ def _select_params(
     split_labels: np.ndarray | None = None,
     score_labels: np.ndarray | None = None,
     mask_channel_indices: list[int] | None = None,
+    channel_noise_transforms: list[str] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     search = model_config.hyperparameter_search
     candidates = _candidate_pool(model_config)
@@ -669,6 +777,7 @@ def _select_params(
                 random_state=random_state + index,
                 progress_description=f"candidate {index + 1}/{len(candidates)} fold {fold_index}/{len(splits)}",
                 mask_channel_indices=mask_channel_indices,
+                channel_noise_transforms=channel_noise_transforms,
             )
             epochs = _epochs_ran(model)
             if epochs is not None:
@@ -911,6 +1020,7 @@ def train_model(config: PipelineConfig, run_root: str | Path, interactive: bool 
         config.model,
     )
     mask_channel_indices = _mask_channel_indices(channel_names)
+    channel_noise_transforms = _channel_noise_transforms(config, group_names, channel_names)
     feature_columns = _feature_columns(paths["datasets"], group_names, ids, x.reshape(len(ids), -1).shape[1])
 
     x_train, x_test, id_train, id_test, y_train, y_test, label_train, label_test = _split_data(
@@ -935,6 +1045,7 @@ def train_model(config: PipelineConfig, run_root: str | Path, interactive: bool 
         split_labels=label_train if problem_type == "classification" else None,
         score_labels=label_train if problem_type == "classification" else None,
         mask_channel_indices=mask_channel_indices,
+        channel_noise_transforms=channel_noise_transforms,
     )
     model, scaler = _fit_estimator(
         problem_type,
@@ -946,6 +1057,7 @@ def train_model(config: PipelineConfig, run_root: str | Path, interactive: bool 
         random_state=config.problem.random_state,
         progress_description="model fit",
         mask_channel_indices=mask_channel_indices,
+        channel_noise_transforms=channel_noise_transforms,
     )
     x_train_proc = _transform_with_scaler(x_train, scaler, config.model)
     x_test_proc = _transform_with_scaler(x_test, scaler, config.model)
@@ -986,6 +1098,7 @@ def train_model(config: PipelineConfig, run_root: str | Path, interactive: bool 
         "input_feature_columns": feature_columns,
         "input_channel_names": channel_names,
         "mask_channel_indices": mask_channel_indices,
+        "channel_noise_transforms": channel_noise_transforms,
         "selected_params": selected_params,
         "cv_results": cv_results,
         "training": _training_info(model),
