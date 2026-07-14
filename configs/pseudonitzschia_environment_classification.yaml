@@ -28,6 +28,7 @@ problem:
   soft_label_prior: 0.05
   test_size: 0.15
   random_state: 42
+  stratify_columns: [STATION]
 
 matchup:
   lat_window: 0.06
@@ -69,8 +70,8 @@ model:
     seed: 42
     noise_std:
       nut: [0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.0, 0.20, 0.20]
-      car: [0.20, 0.20, 0.20, 0.0, 0.20, 0.20, 0.20, 0.20]
-      phy: [0.20, 0.20, 0.0, 0.20, 0.20, 0.20, 0.20, 0.20]
+      car: [0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20]
+      phy: [0.20, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20]
   hyperparameter_search:
     enabled: true
     cv: 3
@@ -160,8 +161,7 @@ products:
       interpolate_dims: [lat, lon, time]
       positive_quantile:
       log: false
-      add_cloud_land_masks: true
-      mask_kinds: [land_mask]
+      add_cloud_land_masks: false
       fillna: 0.0
 
   - name: salinity
@@ -237,8 +237,7 @@ products:
       positive_quantile:
       log1p: true
       exclude_from_log1p: [ph]
-      add_cloud_land_masks: true
-      mask_kinds: [land_mask]
+      add_cloud_land_masks: false
       fillna: 0.0
 
   - name: carbon_dioxide

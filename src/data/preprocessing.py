@@ -57,21 +57,6 @@ def _use_relative_cube_coordinates(data: xr.DataArray) -> xr.DataArray:
     return data.assign_coords(coords) if coords else data
 
 
-def _drop_duplicate_mask_variables(data: xr.DataArray) -> xr.DataArray:
-    if VARIABLE not in data.coords:
-        return data
-    seen_masks = set()
-    keep_indices = []
-    for index, name in enumerate(data[VARIABLE].values):
-        name = str(name)
-        if name in {"cloud_mask", "land_mask"}:
-            if name in seen_masks:
-                continue
-            seen_masks.add(name)
-        keep_indices.append(index)
-    return data.isel({VARIABLE: keep_indices})
-
-
 def _ordered_common_ids(arrays: list[xr.DataArray], group_name: str) -> np.ndarray:
     if not arrays or any("Id" not in array.dims for array in arrays):
         return np.array([])
@@ -335,7 +320,6 @@ def preprocess_matchups(config: PipelineConfig, run_root: str | Path) -> dict[st
             group = arrays[0]
         else:
             group = xr.concat(arrays, dim=VARIABLE, coords="minimal", compat="override", join="override")
-        group = _drop_duplicate_mask_variables(group)
         path = datasets_dir / f"{group_name}.nc"
         group.to_netcdf(path)
         artifacts[group_name] = path
