@@ -83,27 +83,6 @@ model:
         reg_factor: 0.0001
         learning_rate: 0.0001
         name: m
-        use_decision_threshold: false
-        metrics: [accuracy]
-      - dims: [16, 8, 4, 4]
-        kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [5, 5, 15]]
-        output_dim: 3
-        dropout: 0.0
-        reg_factor: 0.0001
-        learning_rate: 0.0001
-        decision_class_index: 2
-        decision_threshold: 0.35
-        name: m_class2_t035
-        metrics: [accuracy]
-      - dims: [16, 8, 4, 4]
-        kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [5, 5, 15]]
-        output_dim: 3
-        dropout: 0.0
-        reg_factor: 0.0001
-        learning_rate: 0.0001
-        decision_class_index: 2
-        decision_threshold: 0.4
-        name: m_class2_t040
         metrics: [accuracy]
       - dims: [16, 8, 4, 4]
         kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [5, 5, 15]]
@@ -111,19 +90,7 @@ model:
         dropout: 0.1
         reg_factor: 0.0002
         learning_rate: 0.0001
-        decision_class_index: 2
-        decision_threshold: 0.35
-        name: m_light_class2_t035
-        metrics: [accuracy]
-      - dims: [16, 8, 4, 4]
-        kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [5, 5, 15]]
-        output_dim: 3
-        dropout: 0.1
-        reg_factor: 0.0002
-        learning_rate: 0.0001
-        decision_class_index: 2
-        decision_threshold: 0.4
-        name: m_light_class2_t040
+        name: m_light
         metrics: [accuracy]
       - dims: [16, 8, 4, 4]
         kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [5, 5, 15]]
@@ -131,9 +98,7 @@ model:
         dropout: 0.2
         reg_factor: 0.0005
         learning_rate: 0.0001
-        decision_class_index: 2
-        decision_threshold: 0.35
-        name: m_dropout_class2_t035
+        name: m_dropout
         metrics: [accuracy]
 
 products:

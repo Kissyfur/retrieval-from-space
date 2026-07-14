@@ -5,23 +5,11 @@ from pathlib import Path
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score
 
 
-def labels_from_probabilities(probabilities, class_index: int | None = None, threshold: float | None = None):
+def labels_from_probabilities(probabilities):
     probabilities = np.asarray(probabilities)
     if probabilities.ndim <= 1 or probabilities.shape[1] <= 1:
         return probabilities.reshape(-1)
-    if class_index is None or threshold is None:
-        return np.argmax(probabilities, axis=1)
-
-    class_index = int(class_index)
-    if class_index < 0 or class_index >= probabilities.shape[1]:
-        raise ValueError(
-            f"class_index must be between 0 and {probabilities.shape[1] - 1}; got {class_index}."
-        )
-    fallback = probabilities.copy()
-    fallback[:, class_index] = -np.inf
-    labels = np.argmax(fallback, axis=1)
-    labels[probabilities[:, class_index] >= float(threshold)] = class_index
-    return labels
+    return np.argmax(probabilities, axis=1)
 
 
 def classification_metrics(y_true, y_pred, labels=None) -> dict[str, object]:
@@ -74,12 +62,12 @@ def save_confusion_matrix_plot(
     ax.set_xticks(np.arange(len(labels)), labels=[str(label) for label in labels])
     ax.set_yticks(np.arange(len(labels)), labels=[str(label) for label in labels])
 
-    threshold = float(np.nanmax(matrix)) / 2 if matrix.size else 0.0
+    color_midpoint = float(np.nanmax(matrix)) / 2 if matrix.size else 0.0
     for row in range(matrix.shape[0]):
         for col in range(matrix.shape[1]):
             value = matrix[row, col]
             text = f"{value:.2f}" if normalize else f"{int(value)}"
-            color = "white" if value > threshold else "black"
+            color = "white" if value > color_midpoint else "black"
             ax.text(col, row, text, ha="center", va="center", color=color)
     fig.tight_layout()
     fig.savefig(path, format="jpg", bbox_inches="tight")

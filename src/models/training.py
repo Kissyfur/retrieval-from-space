@@ -17,12 +17,18 @@ from tqdm.auto import tqdm
 from src.config import ModelConfig, PipelineConfig
 from src.metrics.classification import (
     classification_metrics,
-    labels_from_probabilities,
     save_confusion_matrix_plot,
 )
 from src.metrics.regression import regression_metrics
-from src.models.factory import DECISION_PARAM_KEYS, create_model
+from src.models.factory import REPORT_PARAM_KEYS, create_model
 from src.models.tree import save_pickle_model
+
+
+DISALLOWED_DECISION_PARAM_KEYS = {
+    "decision_class_index",
+    "decision_threshold",
+    "use_decision_threshold",
+}
 
 
 def interval_labeling(values: np.ndarray, intervals: list[list[float]]) -> np.ndarray:
@@ -90,21 +96,28 @@ def _json_default(value: Any):
 
 
 class ArrayStandardizer:
-    def __init__(self):
+    def __init__(self, passthrough_indices: list[int] | None = None):
         self.mean_ = None
         self.std_ = None
+        self.passthrough_indices = [] if passthrough_indices is None else list(passthrough_indices)
 
     def fit(self, x: np.ndarray) -> "ArrayStandardizer":
         axes = tuple(range(x.ndim - 1))
         self.mean_ = np.nanmean(x, axis=axes, keepdims=True)
         self.std_ = np.nanstd(x, axis=axes, keepdims=True)
         self.std_ = np.where(self.std_ == 0, 1.0, self.std_)
+        if self.passthrough_indices:
+            self.mean_[..., self.passthrough_indices] = 0.0
+            self.std_[..., self.passthrough_indices] = 1.0
         return self
 
     def transform(self, x: np.ndarray) -> np.ndarray:
         if self.mean_ is None or self.std_ is None:
             raise ValueError("The array standardizer has not been fitted.")
-        return (x - self.mean_) / self.std_
+        transformed = (x - self.mean_) / self.std_
+        if self.passthrough_indices:
+            transformed[..., self.passthrough_indices] = x[..., self.passthrough_indices]
+        return transformed
 
     def fit_transform(self, x: np.ndarray) -> np.ndarray:
         return self.fit(x).transform(x)
@@ -146,23 +159,31 @@ def _load_group(path: Path, ids, flatten: bool = True) -> np.ndarray:
     return np.asarray(data.values).reshape(len(ids), -1)
 
 
+def _group_channel_names(path: Path) -> list[str]:
+    data = xr.load_dataarray(path)
+    if "variable" not in data.coords:
+        return []
+    return [str(value) for value in data["variable"].values]
+
+
 def _load_matrix_for_groups(
     datasets_dir: Path,
     ids,
     feature_groups: list[str],
     model_config: ModelConfig | None = None,
-) -> tuple[np.ndarray, list[str]]:
+) -> tuple[np.ndarray, list[str], list[str]]:
     group_paths = _feature_group_paths(datasets_dir, feature_groups)
     missing = [path for path in group_paths if not path.exists()]
     if missing:
         raise FileNotFoundError(f"Missing feature group files: {missing}")
+    channel_names = [name for path in group_paths for name in _group_channel_names(path)]
     if model_config is not None and _model_uses_cnn3d(model_config):
         x = np.concatenate([_load_group(path, ids, flatten=False) for path in group_paths], axis=-1)
-        x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+        x = np.where(np.isinf(x), np.nan, x)
     else:
         x = np.hstack([_load_group(path, ids) for path in group_paths])
         x = np.where(np.isinf(x), np.nan, x)
-    return x, [path.stem for path in group_paths]
+    return x, [path.stem for path in group_paths], channel_names
 
 
 def _feature_columns(datasets_dir: Path, group_names: list[str], ids, width: int) -> list[str]:
@@ -178,6 +199,14 @@ def _feature_columns(datasets_dir: Path, group_names: list[str], ids, width: int
     if len(columns) != width:
         return [f"feature_{index}" for index in range(width)]
     return columns
+
+
+def _mask_channel_indices(channel_names: list[str]) -> list[int]:
+    return [
+        index
+        for index, name in enumerate(channel_names)
+        if str(name).split(":")[-1] in {"cloud_mask", "land_mask"}
+    ]
 
 
 def _prepare_model_target(
@@ -292,14 +321,22 @@ def _sampled_candidates(model_config: ModelConfig) -> list[dict[str, Any]]:
 def _candidate_pool(model_config: ModelConfig) -> list[dict[str, Any]]:
     search = model_config.hyperparameter_search
     if not search.enabled:
-        return [dict(model_config.params)]
-    candidates = [{**model_config.params, **candidate} for candidate in search.candidates]
-    if search.param_grid:
-        keys = list(search.param_grid.keys())
-        for values in product(*[search.param_grid[key] for key in keys]):
-            candidates.append({**model_config.params, **dict(zip(keys, values))})
-    candidates.extend(_sampled_candidates(model_config))
-    return candidates or [dict(model_config.params)]
+        candidates = [dict(model_config.params)]
+    else:
+        candidates = [{**model_config.params, **candidate} for candidate in search.candidates]
+        if search.param_grid:
+            keys = list(search.param_grid.keys())
+            for values in product(*[search.param_grid[key] for key in keys]):
+                candidates.append({**model_config.params, **dict(zip(keys, values))})
+        candidates.extend(_sampled_candidates(model_config))
+        candidates = candidates or [dict(model_config.params)]
+    invalid_keys = sorted({key for candidate in candidates for key in candidate if key in DISALLOWED_DECISION_PARAM_KEYS})
+    if invalid_keys:
+        raise ValueError(
+            "Decision-threshold hyperparameters are no longer supported in model selection: "
+            f"{invalid_keys}"
+        )
+    return candidates
 
 
 def _default_scoring(problem_type: str) -> str:
@@ -400,6 +437,14 @@ def _noise_std_array(model_config: ModelConfig, x: np.ndarray) -> tuple[np.ndarr
     return float(std), info
 
 
+def _zero_mask_noise(noise_std: np.ndarray | float, mask_channel_indices: list[int]) -> np.ndarray | float:
+    if not mask_channel_indices or np.isscalar(noise_std):
+        return noise_std
+    adjusted = np.array(noise_std, copy=True)
+    adjusted[..., mask_channel_indices] = 0.0
+    return adjusted
+
+
 def _augment_training_data(
     x: np.ndarray,
     y: np.ndarray,
@@ -407,6 +452,7 @@ def _augment_training_data(
     sample_weight: np.ndarray | None,
     model_config: ModelConfig,
     random_state: int,
+    mask_channel_indices: list[int] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None, dict[str, Any]]:
     config = model_config.augmentation
     if not config or not bool(config.get("enabled", config.get("augment", False))):
@@ -419,8 +465,14 @@ def _augment_training_data(
     rng = np.random.default_rng(int(config.get("seed", random_state)))
     x_aug = np.repeat(x, repetitions, axis=0).astype(np.float32, copy=True)
     noise_std, noise_info = _noise_std_array(model_config, x_aug)
+    mask_channel_indices = [] if mask_channel_indices is None else list(mask_channel_indices)
+    if mask_channel_indices:
+        noise_std = _zero_mask_noise(noise_std, mask_channel_indices)
+        noise_info = {**noise_info, "mask_channels_without_noise": mask_channel_indices}
     if np.any(np.asarray(noise_std) != 0):
         x_aug = x_aug + rng.normal(0.0, noise_std, size=x_aug.shape)
+    if mask_channel_indices:
+        x_aug[..., mask_channel_indices] = np.repeat(x, repetitions, axis=0)[..., mask_channel_indices]
     y_aug = np.repeat(y, repetitions, axis=0)
     labels_aug = None if labels is None else np.repeat(labels, repetitions, axis=0)
     weight_aug = None if sample_weight is None else np.repeat(sample_weight, repetitions, axis=0)
@@ -443,56 +495,44 @@ def _augment_training_data(
 def _fit_scaler_if_needed(
     x: np.ndarray,
     model_config: ModelConfig,
+    mask_channel_indices: list[int] | None = None,
 ) -> tuple[np.ndarray, StandardScaler | ArrayStandardizer | None]:
     if not model_config.standardize:
         return x, None
     if _model_uses_cnn3d(model_config):
-        scaler = ArrayStandardizer()
+        scaler = ArrayStandardizer(passthrough_indices=mask_channel_indices)
         return scaler.fit_transform(x), scaler
     scaler = StandardScaler()
     return scaler.fit_transform(x), scaler
 
 
-def _transform_with_scaler(x: np.ndarray, scaler: StandardScaler | ArrayStandardizer | None) -> np.ndarray:
-    return x if scaler is None else scaler.transform(x)
+def _fill_missing_for_model(x: np.ndarray, model_config: ModelConfig) -> np.ndarray:
+    if _model_uses_cnn3d(model_config):
+        return np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+    return x
+
+
+def _transform_with_scaler(
+    x: np.ndarray,
+    scaler: StandardScaler | ArrayStandardizer | None,
+    model_config: ModelConfig,
+) -> np.ndarray:
+    transformed = x if scaler is None else scaler.transform(x)
+    transformed = _fill_missing_for_model(transformed, model_config)
+    passthrough = getattr(scaler, "passthrough_indices", []) if scaler is not None else []
+    if passthrough:
+        transformed[..., passthrough] = (transformed[..., passthrough] > 0.5).astype(np.float32)
+    return transformed
 
 
 def _estimator_params(params: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in params.items() if key not in DECISION_PARAM_KEYS}
-
-
-def _decision_rule_from_params(params: dict[str, Any]) -> dict[str, Any] | None:
-    if params.get("use_decision_threshold") is False:
-        return None
-    threshold = params.get("decision_threshold")
-    if threshold is None:
-        return None
-    return {
-        "class_index": int(params.get("decision_class_index", 2)),
-        "threshold": float(threshold),
-    }
-
-
-def _prediction_labels_from_params(
-    problem_type: str,
-    prediction: np.ndarray,
-    params: dict[str, Any],
-) -> np.ndarray:
-    if problem_type == "classification":
-        rule = _decision_rule_from_params(params)
-        prediction = np.asarray(prediction)
-        if rule and prediction.ndim > 1 and prediction.shape[1] > 1:
-            return labels_from_probabilities(prediction, rule["class_index"], rule["threshold"])
-    return _prediction_labels(problem_type, prediction)
+    return {key: value for key, value in params.items() if key not in REPORT_PARAM_KEYS}
 
 
 def _prediction_rule_name(problem_type: str, params: dict[str, Any]) -> str:
     if problem_type != "classification":
         return "direct"
-    rule = _decision_rule_from_params(params)
-    if not rule:
-        return "argmax"
-    return f"class_{rule['class_index']}_threshold_{rule['threshold']}"
+    return "argmax"
 
 
 def _validate_target_compatibility(
@@ -520,18 +560,21 @@ def _fit_estimator(
     y_labels: np.ndarray | None = None,
     random_state: int = 42,
     progress_description: str | None = None,
+    mask_channel_indices: list[int] | None = None,
 ):
     _validate_target_compatibility(problem_type, model_config, y)
-    x_proc, scaler = _fit_scaler_if_needed(x, model_config)
     sample_weight, sample_weight_info = _make_sample_weights(problem_type, model_config, y_labels)
-    x_fit, y_fit, labels_fit, sample_weight_fit, augmentation_info = _augment_training_data(
-        x_proc,
+    x_fit_raw, y_fit, labels_fit, sample_weight_fit, augmentation_info = _augment_training_data(
+        x,
         y,
         y_labels,
         sample_weight,
         model_config,
         random_state,
+        mask_channel_indices=mask_channel_indices,
     )
+    _, scaler = _fit_scaler_if_needed(x, model_config, mask_channel_indices=mask_channel_indices)
+    x_fit = _transform_with_scaler(x_fit_raw, scaler, model_config)
     fit_params = dict(params)
     if progress_description and _model_uses_keras(model_config):
         fit_params.setdefault("progress_description", progress_description)
@@ -570,9 +613,17 @@ def _score_classification_predictions(y_true, y_pred, scoring: str) -> float:
     if scoring == "recall_macro":
         return float(metrics["recall_macro"])
     raise ValueError(
-        "Threshold-based classification scoring supports accuracy, f1_macro, "
+        "Classification CV scoring supports accuracy, f1_macro, "
         "precision_macro, and recall_macro."
     )
+
+
+def _epochs_ran(model) -> int | None:
+    history = _history_summary(model)
+    if not history:
+        return None
+    epochs = history.get("epochs_ran")
+    return None if epochs is None else int(epochs)
 
 
 def _select_params(
@@ -583,6 +634,7 @@ def _select_params(
     random_state: int,
     split_labels: np.ndarray | None = None,
     score_labels: np.ndarray | None = None,
+    mask_channel_indices: list[int] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     search = model_config.hyperparameter_search
     candidates = _candidate_pool(model_config)
@@ -597,6 +649,7 @@ def _select_params(
     candidate_bar = tqdm(candidates, desc="model hyperparameters", unit="candidate")
     for index, params in enumerate(candidate_bar):
         scores = []
+        fold_epochs = []
         splits = list(splitter.split(x, split_y))
         fold_bar = tqdm(
             splits,
@@ -615,11 +668,15 @@ def _select_params(
                 y_labels=train_labels,
                 random_state=random_state + index,
                 progress_description=f"candidate {index + 1}/{len(candidates)} fold {fold_index}/{len(splits)}",
+                mask_channel_indices=mask_channel_indices,
             )
-            x_val = _transform_with_scaler(x[val_idx], scaler)
+            epochs = _epochs_ran(model)
+            if epochs is not None:
+                fold_epochs.append(epochs)
+            x_val = _transform_with_scaler(x[val_idx], scaler, model_config)
             if problem_type == "classification":
                 val_signal = _predict_signal(problem_type, model, x_val)
-                val_pred = _prediction_labels_from_params(problem_type, val_signal, params)
+                val_pred = _prediction_labels(problem_type, val_signal)
                 score = _score_classification_predictions(
                     score_y[val_idx],
                     val_pred,
@@ -628,9 +685,19 @@ def _select_params(
             else:
                 score = float(scorer(model, x_val, score_y[val_idx]))
             scores.append(score)
-            fold_bar.set_postfix(score=f"{score:.4g}")
+            postfix = {"score": f"{score:.4g}"}
+            if epochs is not None:
+                postfix["epochs"] = str(epochs)
+            fold_bar.set_postfix(**postfix)
         mean_score = float(np.mean(scores))
         std_score = float(np.std(scores))
+        epoch_summary = {}
+        if fold_epochs:
+            epoch_summary = {
+                "fold_epochs": fold_epochs,
+                "mean_epochs": float(np.mean(fold_epochs)),
+                "median_epochs": float(np.median(fold_epochs)),
+            }
         cv_results.append(
             {
                 "candidate_index": index,
@@ -639,11 +706,27 @@ def _select_params(
                 "scores": scores,
                 "mean_score": mean_score,
                 "std_score": std_score,
+                **epoch_summary,
             }
         )
         candidate_bar.set_postfix(best=f"{max(row['mean_score'] for row in cv_results):.4g}")
     best = max(cv_results, key=lambda row: row["mean_score"])
-    return dict(best["params"]), cv_results
+    selected = dict(best["params"])
+    if best.get("fold_epochs"):
+        median_epochs = float(best["median_epochs"])
+        final_epochs = max(1, int(round(median_epochs)))
+        selected.update(
+            {
+                "cv_epochs": list(best["fold_epochs"]),
+                "cv_epochs_mean": float(best["mean_epochs"]),
+                "cv_epochs_median": median_epochs,
+                "epochs": final_epochs,
+                "validation_split": 0.0,
+                "patience": 0,
+                "final_training_epoch_source": "cv_median_epochs_no_validation",
+            }
+        )
+    return selected, cv_results
 
 
 def _predict_signal(problem_type: str, model, x: np.ndarray) -> np.ndarray:
@@ -821,7 +904,13 @@ def train_model(config: PipelineConfig, run_root: str | Path, interactive: bool 
     paths = _run_paths(run_root)
     ids, raw_target = _load_target_values(paths["datasets"])
     y_target, y_labels, label_values = _prepare_model_target(config, problem_type, raw_target)
-    x, group_names = _load_matrix_for_groups(paths["datasets"], ids, config.model.feature_groups, config.model)
+    x, group_names, channel_names = _load_matrix_for_groups(
+        paths["datasets"],
+        ids,
+        config.model.feature_groups,
+        config.model,
+    )
+    mask_channel_indices = _mask_channel_indices(channel_names)
     feature_columns = _feature_columns(paths["datasets"], group_names, ids, x.reshape(len(ids), -1).shape[1])
 
     x_train, x_test, id_train, id_test, y_train, y_test, label_train, label_test = _split_data(
@@ -845,6 +934,7 @@ def train_model(config: PipelineConfig, run_root: str | Path, interactive: bool 
         config.problem.random_state,
         split_labels=label_train if problem_type == "classification" else None,
         score_labels=label_train if problem_type == "classification" else None,
+        mask_channel_indices=mask_channel_indices,
     )
     model, scaler = _fit_estimator(
         problem_type,
@@ -855,13 +945,14 @@ def train_model(config: PipelineConfig, run_root: str | Path, interactive: bool 
         y_labels=label_train,
         random_state=config.problem.random_state,
         progress_description="model fit",
+        mask_channel_indices=mask_channel_indices,
     )
-    x_train_proc = _transform_with_scaler(x_train, scaler)
-    x_test_proc = _transform_with_scaler(x_test, scaler)
+    x_train_proc = _transform_with_scaler(x_train, scaler, config.model)
+    x_test_proc = _transform_with_scaler(x_test, scaler, config.model)
     train_signal = _predict_signal(problem_type, model, x_train_proc)
     test_signal = _predict_signal(problem_type, model, x_test_proc)
-    train_pred = _prediction_labels_from_params(problem_type, train_signal, selected_params)
-    test_pred = _prediction_labels_from_params(problem_type, test_signal, selected_params)
+    train_pred = _prediction_labels(problem_type, train_signal)
+    test_pred = _prediction_labels(problem_type, test_signal)
     prediction_rule = _prediction_rule_name(problem_type, selected_params)
 
     train_metrics = _evaluate(problem_type, train_metric_target, train_pred, label_values)
@@ -893,6 +984,8 @@ def train_model(config: PipelineConfig, run_root: str | Path, interactive: bool 
         "input_shape": list(x.shape),
         "input_feature_count": int(x.reshape(len(ids), -1).shape[1]),
         "input_feature_columns": feature_columns,
+        "input_channel_names": channel_names,
+        "mask_channel_indices": mask_channel_indices,
         "selected_params": selected_params,
         "cv_results": cv_results,
         "training": _training_info(model),

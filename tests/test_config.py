@@ -12,10 +12,12 @@ from src.config import ModelConfig, PipelineConfig, ProblemConfig, ProductSpec, 
 from src.data.preprocessing import transform_target
 from src.data.targets import metadata_to_dataarray
 from src.models.training import (
+    ArrayStandardizer,
     _augment_training_data,
     _candidate_pool,
     _load_matrix_for_groups,
     _make_sample_weights,
+    _transform_with_scaler,
     interval_soft_labeling,
     train_model,
 )
@@ -44,18 +46,15 @@ def test_pseudonitzschia_configs_are_single_model_experiments():
     assert environment.products[7].preprocess["exclude_from_log1p"] == ["ph"]
     assert [candidate["name"] for candidate in environment.model.hyperparameter_search.candidates] == [
         "m",
-        "m_class2_t035",
-        "m_class2_t040",
-        "m_light_class2_t035",
-        "m_light_class2_t040",
-        "m_dropout_class2_t035",
+        "m_light",
+        "m_dropout",
     ]
 
     for config in [optics, environment]:
         assert not hasattr(config.model, "strategy")
-        assert len(config.model.hyperparameter_search.candidates) == 6
-        assert config.model.hyperparameter_search.candidates[0]["use_decision_threshold"] is False
-        assert config.model.hyperparameter_search.candidates[1]["decision_class_index"] == 2
+        assert len(config.model.hyperparameter_search.candidates) == 3
+        assert all("decision_threshold" not in candidate for candidate in config.model.hyperparameter_search.candidates)
+        assert all("decision_class_index" not in candidate for candidate in config.model.hyperparameter_search.candidates)
         assert config.model.sample_weight["mode"] == "balanced"
         assert config.model.augmentation["repetitions"] == 10
 
@@ -114,7 +113,7 @@ def test_log_target_transform_supports_offset():
     assert np.allclose(transformed.values, np.log([100.0, 1000.0]))
 
 
-def test_cnn_loader_fills_missing_values_but_tree_loader_keeps_them(tmp_path):
+def test_cnn_loader_preserves_missing_values_until_standardization(tmp_path):
     datasets_dir = tmp_path / "datasets"
     datasets_dir.mkdir()
     data = xr.DataArray(
@@ -131,13 +130,13 @@ def test_cnn_loader_fills_missing_values_but_tree_loader_keeps_them(tmp_path):
     data.values[0, 0, 0, 0, 0] = np.nan
     data.to_netcdf(datasets_dir / "optics.nc")
 
-    cnn_x, _ = _load_matrix_for_groups(
+    cnn_x, _, cnn_channels = _load_matrix_for_groups(
         datasets_dir,
         [1, 2],
         ["optics"],
         ModelConfig(family="cnn3d", feature_groups=["optics"]),
     )
-    tree_x, _ = _load_matrix_for_groups(
+    tree_x, _, tree_channels = _load_matrix_for_groups(
         datasets_dir,
         [1, 2],
         ["optics"],
@@ -145,9 +144,47 @@ def test_cnn_loader_fills_missing_values_but_tree_loader_keeps_them(tmp_path):
     )
 
     assert cnn_x.shape == (2, 2, 2, 2, 3)
-    assert np.isfinite(cnn_x).all()
+    assert np.isnan(cnn_x).sum() == 1
+    assert cnn_channels == ["a", "b", "c"]
     assert tree_x.shape == (2, 24)
     assert np.isnan(tree_x).sum() == 1
+    assert tree_channels == ["a", "b", "c"]
+
+
+def test_cnn_standardizer_ignores_missing_values_and_then_fills_zero():
+    model = ModelConfig(family="cnn3d", feature_groups=["optics"])
+    x = np.array(
+        [
+            [[[[1.0], [np.nan]]]],
+            [[[[3.0], [5.0]]]],
+        ],
+        dtype=np.float32,
+    )
+    scaler = ArrayStandardizer().fit(x)
+
+    transformed = _transform_with_scaler(x, scaler, model)
+
+    assert np.isfinite(transformed).all()
+    assert transformed[0, 0, 0, 1, 0] == 0.0
+    assert np.allclose(scaler.mean_.reshape(-1), [3.0])
+
+
+def test_cnn_standardizer_leaves_mask_channels_binary():
+    model = ModelConfig(family="cnn3d", feature_groups=["optics"])
+    x = np.array(
+        [
+            [[[[1.0, 0.0], [3.0, 1.0]]]],
+            [[[[5.0, 1.0], [7.0, 0.0]]]],
+        ],
+        dtype=np.float32,
+    )
+    scaler = ArrayStandardizer(passthrough_indices=[1]).fit(x)
+
+    transformed = _transform_with_scaler(x, scaler, model)
+
+    assert set(np.unique(transformed[..., 1]).tolist()) == {0.0, 1.0}
+    assert np.allclose(transformed[..., 1], x[..., 1])
+    assert not np.allclose(transformed[..., 0], x[..., 0])
 
 
 def test_candidate_pool_combines_fixed_candidates_and_random_samples():
@@ -173,6 +210,21 @@ def test_candidate_pool_combines_fixed_candidates_and_random_samples():
     assert len(candidates) == 3
     assert candidates[0]["n_estimators"] == 10
     assert all(candidate["random_state"] == 42 for candidate in candidates)
+
+
+def test_candidate_pool_rejects_decision_threshold_keys():
+    model = ModelConfig.from_dict(
+        {
+            "family": "random_forest",
+            "hyperparameter_search": {
+                "enabled": True,
+                "candidates": [{"decision_threshold": 0.5}],
+            },
+        }
+    )
+
+    with pytest.raises(ValueError, match="Decision-threshold hyperparameters"):
+        _candidate_pool(model)
 
 
 def test_balanced_weights_and_augmentation_preserve_targets():
@@ -207,6 +259,42 @@ def test_balanced_weights_and_augmentation_preserve_targets():
     assert labels_fit.tolist() == labels.tolist() + np.repeat(labels, 2).tolist()
     assert weights_fit.shape == (12,)
     assert augmentation_info["fit_samples"] == 12
+
+
+def test_augmentation_does_not_add_noise_to_mask_channels():
+    model = ModelConfig(
+        family="cnn3d",
+        feature_groups=["optics"],
+        augmentation={
+            "enabled": True,
+            "repetitions": 2,
+            "seed": 123,
+            "noise_std": {"optics": [1.0, 1.0]},
+        },
+    )
+    labels = np.array([0, 1])
+    targets = np.eye(2)[labels]
+    x = np.array(
+        [
+            [[[[0.5, 0.0]]]],
+            [[[[1.5, 1.0]]]],
+        ],
+        dtype=np.float32,
+    )
+
+    x_fit, *_ = _augment_training_data(
+        x,
+        targets,
+        labels,
+        None,
+        model,
+        random_state=42,
+        mask_channel_indices=[1],
+    )
+
+    assert set(np.unique(x_fit[..., 1]).tolist()) == {0.0, 1.0}
+    assert np.allclose(x_fit[:2, ..., 1], x[..., 1])
+    assert np.allclose(x_fit[2:, ..., 1].reshape(-1), np.repeat(x[..., 1].reshape(-1), 2))
 
 
 def test_direct_training_saves_single_model_outputs(tmp_path):
@@ -263,64 +351,3 @@ def test_direct_training_saves_single_model_outputs(tmp_path):
     assert (run_root / "metrics" / "confusion_matrix.jpg").exists()
     assert report["feature_groups"] == ["optics"]
     assert "test_metrics" in report
-
-
-def test_candidate_threshold_rule_is_applied_without_threshold_study(tmp_path):
-    run_root = tmp_path / "run"
-    datasets_dir = run_root / "datasets"
-    datasets_dir.mkdir(parents=True)
-    ids = np.arange(30)
-    labels = np.tile(np.arange(3), 10)
-    features = np.column_stack(
-        [
-            labels == 0,
-            labels == 1,
-            labels == 2,
-            ids / len(ids),
-        ]
-    ).astype(np.float32)
-
-    xr.DataArray(
-        labels.astype(float).reshape(-1, 1),
-        dims=("Id", "variable"),
-        coords={"Id": ids, "variable": ["target"]},
-    ).to_netcdf(datasets_dir / "target.nc")
-    xr.DataArray(
-        features,
-        dims=("Id", "variable"),
-        coords={"Id": ids, "variable": ["a", "b", "c", "d"]},
-    ).to_netcdf(datasets_dir / "optics.nc")
-
-    config = PipelineConfig(
-        target=TargetConfig(path=str(tmp_path / "unused.csv"), target_column="target"),
-        products=[ProductSpec(name="local", dataset_ids=["local"], feature_group="optics")],
-        problem=ProblemConfig(
-            type="classification",
-            class_intervals=[[-0.5, 0.5], [0.5, 1.5], [1.5, 2.5]],
-            class_encoding="hard",
-            test_size=0.3,
-            random_state=42,
-        ),
-        model=ModelConfig(
-            family="random_forest",
-            feature_groups=["optics"],
-            params={
-                "n_estimators": 20,
-                "random_state": 42,
-                "decision_class_index": 2,
-                "decision_threshold": 0.45,
-            },
-        ),
-    )
-
-    artifacts = train_model(config, run_root)
-    report = json.loads((run_root / "reports" / "training_report.json").read_text())
-    predictions = pd.read_csv(run_root / "metrics" / "predictions.csv")
-
-    assert report["prediction_rule"] == "class_2_threshold_0.45"
-    assert report["selected_params"]["decision_threshold"] == 0.45
-    assert "decision_thresholds" not in artifacts
-    assert "decision_thresholds" not in report
-    assert "argmax_test_metrics" not in report
-    assert "y_pred_argmax" not in predictions.columns
-    assert predictions["prediction_rule"].unique().tolist() == ["class_2_threshold_0.45"]
