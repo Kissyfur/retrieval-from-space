@@ -28,7 +28,6 @@ problem:
   soft_label_prior: 0.05
   test_size: 0.15
   random_state: 42
-  stratify_columns: [STATION]
 
 matchup:
   lat_window: 0.06

@@ -15,12 +15,9 @@ from src.models.training import (
     ArrayStandardizer,
     _augment_training_data,
     _candidate_pool,
-    _compose_stratify_labels,
     _load_matrix_for_groups,
     _make_sample_weights,
     _transform_with_scaler,
-    _usable_cv_stratify_labels,
-    _usable_stratify_labels,
     interval_soft_labeling,
     train_model,
 )
@@ -44,7 +41,6 @@ def test_pseudonitzschia_configs_are_single_model_experiments():
     assert environment.model.family == "cnn3d"
     assert environment.model.feature_groups == ["nut", "car", "phy"]
     assert environment.problem.test_size == 0.15
-    assert environment.problem.stratify_columns == ["STATION"]
     assert len(environment.products) == 10
     assert environment.products[0].preprocess["derived_variables"][0]["name"] == "din"
     assert environment.products[7].preprocess["exclude_from_log1p"] == ["ph"]
@@ -120,23 +116,6 @@ def test_log_target_transform_supports_offset():
     transformed = transform_target(target, "log", offset=100.0)
 
     assert np.allclose(transformed.values, np.log([100.0, 1000.0]))
-
-
-def test_extra_stratification_composes_with_class_labels_and_falls_back_when_sparse():
-    class_labels = np.array([0, 0, 1, 1, 0, 1])
-    stations = pd.DataFrame({"STATION": ["A", "A", "B", "B", "C", "D"]})
-
-    requested = _compose_stratify_labels(class_labels, stations)
-    assert requested.tolist() == ["0||A", "0||A", "1||B", "1||B", "0||C", "1||D"]
-
-    labels, info = _usable_stratify_labels(requested, class_labels, 0.5, "train_test_split")
-    assert labels.tolist() == class_labels.tolist()
-    assert info["fallback"] is True
-    assert info["used"] is False
-
-    labels, info = _usable_cv_stratify_labels(class_labels, class_labels, 3)
-    assert labels.tolist() == class_labels.tolist()
-    assert info["used"] is True
 
 
 def test_cnn_loader_preserves_missing_values_until_standardization(tmp_path):

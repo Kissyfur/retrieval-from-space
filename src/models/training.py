@@ -736,7 +736,6 @@ def _select_params(
     random_state: int,
     split_labels: np.ndarray | None = None,
     score_labels: np.ndarray | None = None,
-    cv_stratify_info: dict[str, Any] | None = None,
     mask_channel_indices: list[int] | None = None,
     channel_noise_transforms: list[str] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -762,7 +761,7 @@ def _select_params(
             leave=False,
         )
         for fold_index, (train_idx, val_idx) in enumerate(fold_bar, start=1):
-            train_labels = score_y[train_idx] if problem_type == "classification" else None
+            train_labels = split_y[train_idx] if problem_type == "classification" else None
             model, scaler = _fit_estimator(
                 problem_type,
                 model_config,
@@ -811,7 +810,6 @@ def _select_params(
                 "scores": scores,
                 "mean_score": mean_score,
                 "std_score": std_score,
-                "stratification": cv_stratify_info,
                 **epoch_summary,
             }
         )
@@ -932,160 +930,8 @@ def _load_target_values(datasets_dir: Path):
     return ids, values
 
 
-def _load_extra_stratify_columns(config: PipelineConfig, run_root: Path, ids) -> pd.DataFrame | None:
-    columns = list(config.problem.stratify_columns)
-    if not columns:
-        return None
-
-    target_path = run_root / "processed" / "targets.csv"
-    if not target_path.exists():
-        target_path = Path(config.target.path)
-    if not target_path.exists():
-        raise FileNotFoundError(
-            "Cannot use problem.stratify_columns because the target table was not found at "
-            f"{run_root / 'processed' / 'targets.csv'} or {config.target.path}."
-        )
-
-    targets = pd.read_csv(target_path)
-    missing = [column for column in columns if column not in targets.columns]
-    if missing:
-        raise ValueError(f"Target table is missing configured stratify column(s): {missing}")
-    id_column = "Id" if "Id" in targets.columns else config.target.id_column
-    if id_column not in targets.columns:
-        raise ValueError(
-            "Target table must contain an Id column, or the configured target.id_column, "
-            "to align stratify columns."
-        )
-
-    frame = targets[[id_column, *columns]].rename(columns={id_column: "Id"}).copy()
-    frame["Id"] = frame["Id"].astype(str)
-    frame = frame.drop_duplicates(subset=["Id"], keep="first").set_index("Id")
-    aligned = frame.reindex(pd.Index(map(str, ids), name="Id"))
-    if aligned[columns].isna().any().any():
-        missing_ids = aligned.index[aligned[columns].isna().any(axis=1)].tolist()[:5]
-        raise ValueError(
-            "Configured stratify column(s) are missing for some training ids. "
-            f"Example ids: {missing_ids}"
-        )
-    return aligned[columns].reset_index(drop=True)
-
-
-def _compose_stratify_labels(
-    base_labels: np.ndarray | None,
-    extra_columns: pd.DataFrame | None,
-) -> np.ndarray | None:
-    if base_labels is None and extra_columns is None:
-        return None
-
-    parts: list[pd.Series] = []
-    if base_labels is not None:
-        parts.append(pd.Series(np.asarray(base_labels).reshape(-1), dtype="string"))
-    if extra_columns is not None:
-        for column in extra_columns.columns:
-            parts.append(extra_columns[column].astype("string").reset_index(drop=True))
-    return pd.concat(parts, axis=1).fillna("<missing>").agg("||".join, axis=1).to_numpy()
-
-
-def _usable_stratify_labels(
-    requested: np.ndarray | None,
-    fallback: np.ndarray | None,
-    test_size: float,
-    context: str,
-) -> tuple[np.ndarray | None, dict[str, Any]]:
-    info: dict[str, Any] = {
-        "context": context,
-        "requested": requested is not None,
-        "used": False,
-        "fallback": False,
-        "reason": None,
-        "n_strata": 0,
-        "min_count": None,
-    }
-    if requested is None:
-        return None, info
-
-    labels = np.asarray(requested)
-    _, counts = np.unique(labels, return_counts=True)
-    n_strata = len(counts)
-    min_count = int(counts.min()) if len(counts) else 0
-    n_samples = len(labels)
-    n_test = int(np.ceil(float(test_size) * n_samples))
-    n_train = n_samples - n_test
-    info.update({"n_strata": int(n_strata), "min_count": min_count})
-    if min_count >= 2 and n_train >= n_strata and n_test >= n_strata:
-        info["used"] = True
-        return labels, info
-
-    info["fallback"] = fallback is not None
-    info["reason"] = (
-        "requested stratification has strata that are too rare for the configured split size"
-    )
-    if fallback is None:
-        return None, info
-
-    fallback_labels = np.asarray(fallback)
-    _, fallback_counts = np.unique(fallback_labels, return_counts=True)
-    info["fallback_n_strata"] = int(len(fallback_counts))
-    info["fallback_min_count"] = int(fallback_counts.min()) if len(fallback_counts) else 0
-    return fallback_labels, info
-
-
-def _usable_cv_stratify_labels(
-    requested: np.ndarray | None,
-    fallback: np.ndarray | None,
-    cv: int,
-) -> tuple[np.ndarray | None, dict[str, Any]]:
-    info: dict[str, Any] = {
-        "context": "cross_validation",
-        "requested": requested is not None,
-        "used": False,
-        "fallback": False,
-        "reason": None,
-        "n_strata": 0,
-        "min_count": None,
-    }
-    if requested is None:
-        return None, info
-
-    labels = np.asarray(requested)
-    _, counts = np.unique(labels, return_counts=True)
-    min_count = int(counts.min()) if len(counts) else 0
-    info.update({"n_strata": int(len(counts)), "min_count": min_count})
-    if min_count >= cv:
-        info["used"] = True
-        return labels, info
-
-    info["fallback"] = fallback is not None
-    info["reason"] = (
-        "requested stratification has strata that are too rare for the configured CV folds"
-    )
-    if fallback is None:
-        return None, info
-
-    fallback_labels = np.asarray(fallback)
-    _, fallback_counts = np.unique(fallback_labels, return_counts=True)
-    info["fallback_n_strata"] = int(len(fallback_counts))
-    info["fallback_min_count"] = int(fallback_counts.min()) if len(fallback_counts) else 0
-    return fallback_labels, info
-
-
-def _split_data(
-    x,
-    ids,
-    y_target,
-    y_labels,
-    problem_type: str,
-    test_size: float,
-    random_state: int,
-    stratify_labels: np.ndarray | None = None,
-):
-    fallback = y_labels if problem_type == "classification" else None
-    stratify, stratify_info = _usable_stratify_labels(
-        stratify_labels if stratify_labels is not None else fallback,
-        fallback,
-        test_size,
-        "train_test_split",
-    )
+def _split_data(x, ids, y_target, y_labels, problem_type: str, test_size: float, random_state: int):
+    stratify = y_labels if problem_type == "classification" else None
     arrays = [x, ids, y_target]
     if y_labels is not None:
         arrays.append(y_labels)
@@ -1097,9 +943,9 @@ def _split_data(
     )
     if y_labels is None:
         x_train, x_test, id_train, id_test, y_train, y_test = split
-        return x_train, x_test, id_train, id_test, y_train, y_test, None, None, stratify_info
+        return x_train, x_test, id_train, id_test, y_train, y_test, None, None
     x_train, x_test, id_train, id_test, y_train, y_test, label_train, label_test = split
-    return x_train, x_test, id_train, id_test, y_train, y_test, label_train, label_test, stratify_info
+    return x_train, x_test, id_train, id_test, y_train, y_test, label_train, label_test
 
 
 def _save_predictions(
@@ -1171,13 +1017,8 @@ def train_model(config: PipelineConfig, run_root: str | Path, interactive: bool 
     mask_channel_indices = _mask_channel_indices(channel_names)
     channel_noise_transforms = _channel_noise_transforms(config, group_names, channel_names)
     feature_columns = _feature_columns(paths["datasets"], group_names, ids, x.reshape(len(ids), -1).shape[1])
-    extra_stratify_columns = _load_extra_stratify_columns(config, paths["root"], ids)
-    requested_stratify = _compose_stratify_labels(
-        y_labels if problem_type == "classification" else None,
-        extra_stratify_columns,
-    )
 
-    x_train, x_test, id_train, id_test, y_train, y_test, label_train, label_test, split_stratify_info = _split_data(
+    x_train, x_test, id_train, id_test, y_train, y_test, label_train, label_test = _split_data(
         x,
         ids,
         y_target,
@@ -1185,25 +1026,10 @@ def train_model(config: PipelineConfig, run_root: str | Path, interactive: bool 
         problem_type,
         config.problem.test_size,
         config.problem.random_state,
-        stratify_labels=requested_stratify,
     )
     train_metric_target = _metric_target(problem_type, y_train, label_train)
     test_metric_target = _metric_target(problem_type, y_test, label_test)
     model_y_train = _target_for_model(problem_type, config.model, y_train, label_train)
-    train_extra_stratify = None
-    if extra_stratify_columns is not None:
-        train_extra_stratify = extra_stratify_columns.iloc[
-            pd.Index(map(str, ids)).get_indexer(pd.Index(map(str, id_train)))
-        ].reset_index(drop=True)
-    requested_cv_stratify = _compose_stratify_labels(
-        label_train if problem_type == "classification" else None,
-        train_extra_stratify,
-    )
-    cv_split_labels, cv_stratify_info = _usable_cv_stratify_labels(
-        requested_cv_stratify,
-        label_train if problem_type == "classification" else None,
-        config.model.hyperparameter_search.cv,
-    )
 
     selected_params, cv_results = _select_params(
         problem_type,
@@ -1211,9 +1037,8 @@ def train_model(config: PipelineConfig, run_root: str | Path, interactive: bool 
         x_train,
         model_y_train,
         config.problem.random_state,
-        split_labels=cv_split_labels if problem_type == "classification" else None,
+        split_labels=label_train if problem_type == "classification" else None,
         score_labels=label_train if problem_type == "classification" else None,
-        cv_stratify_info=cv_stratify_info,
         mask_channel_indices=mask_channel_indices,
         channel_noise_transforms=channel_noise_transforms,
     )
@@ -1269,11 +1094,6 @@ def train_model(config: PipelineConfig, run_root: str | Path, interactive: bool 
         "input_channel_names": channel_names,
         "mask_channel_indices": mask_channel_indices,
         "channel_noise_transforms": channel_noise_transforms,
-        "stratification": {
-            "columns": list(config.problem.stratify_columns),
-            "train_test": split_stratify_info,
-            "cross_validation": cv_stratify_info,
-        },
         "selected_params": selected_params,
         "cv_results": cv_results,
         "training": _training_info(model),
@@ -1296,7 +1116,6 @@ def train_model(config: PipelineConfig, run_root: str | Path, interactive: bool 
             "test_ids": list(map(str, id_test)),
             "feature_groups": group_names,
             "selected_params": selected_params,
-            "stratification": report["stratification"],
             "class_distribution": report["class_distribution"],
             "class_encoding": config.problem.class_encoding,
         },
