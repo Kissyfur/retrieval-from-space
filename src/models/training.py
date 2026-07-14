@@ -564,8 +564,10 @@ def _fit_estimator(
 ):
     _validate_target_compatibility(problem_type, model_config, y)
     sample_weight, sample_weight_info = _make_sample_weights(problem_type, model_config, y_labels)
-    x_fit_raw, y_fit, labels_fit, sample_weight_fit, augmentation_info = _augment_training_data(
-        x,
+    _, scaler = _fit_scaler_if_needed(x, model_config, mask_channel_indices=mask_channel_indices)
+    x_proc = _transform_with_scaler(x, scaler, model_config)
+    x_fit, y_fit, labels_fit, sample_weight_fit, augmentation_info = _augment_training_data(
+        x_proc,
         y,
         y_labels,
         sample_weight,
@@ -573,8 +575,6 @@ def _fit_estimator(
         random_state,
         mask_channel_indices=mask_channel_indices,
     )
-    _, scaler = _fit_scaler_if_needed(x, model_config, mask_channel_indices=mask_channel_indices)
-    x_fit = _transform_with_scaler(x_fit_raw, scaler, model_config)
     fit_params = dict(params)
     if progress_description and _model_uses_keras(model_config):
         fit_params.setdefault("progress_description", progress_description)
