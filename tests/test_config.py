@@ -37,6 +37,14 @@ def test_pseudonitzschia_configs_are_single_model_experiments():
     assert optics.problem.class_encoding == "soft_probabilities"
     assert optics.problem.target_transform_offset == 100.0
     assert optics.problem.test_size == 0.15
+    assert [candidate["name"] for candidate in optics.model.hyperparameter_search.candidates] == [
+        "m",
+        "m_less_regularized",
+        "wider",
+        "wider_light",
+        "short_time",
+        "short_time_slow",
+    ]
 
     assert environment.model.family == "cnn3d"
     assert environment.model.feature_groups == ["nut", "car", "phy"]
@@ -52,12 +60,15 @@ def test_pseudonitzschia_configs_are_single_model_experiments():
     assert [candidate["name"] for candidate in environment.model.hyperparameter_search.candidates] == [
         "m",
         "m_light",
-        "m_dropout",
+        "m_light_slow",
+        "m_regularized",
+        "m_short_time",
+        "m_short_time_regularized",
     ]
 
     for config in [optics, environment]:
         assert not hasattr(config.model, "strategy")
-        assert len(config.model.hyperparameter_search.candidates) == 3
+        assert len(config.model.hyperparameter_search.candidates) == 6
         assert all("decision_threshold" not in candidate for candidate in config.model.hyperparameter_search.candidates)
         assert all("decision_class_index" not in candidate for candidate in config.model.hyperparameter_search.candidates)
         assert config.model.sample_weight["mode"] == "balanced"
