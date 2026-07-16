@@ -26,6 +26,8 @@ from src.models.training import (
 def test_pseudonitzschia_configs_are_single_model_experiments():
     optics = load_config("configs/pseudonitzschia_optics_classification.yaml")
     environment = load_config("configs/pseudonitzschia_environment_classification.yaml")
+    environment_seed7 = load_config("configs/pseudonitzschia_environment_classification_seed7.yaml")
+    environment_seed123 = load_config("configs/pseudonitzschia_environment_classification_seed123.yaml")
 
     assert optics.model.family == "cnn3d"
     assert optics.model.feature_groups == ["optics"]
@@ -41,9 +43,7 @@ def test_pseudonitzschia_configs_are_single_model_experiments():
         "m",
         "m_less_regularized",
         "wider",
-        "wider_light",
         "short_time",
-        "short_time_slow",
     ]
 
     assert environment.model.family == "cnn3d"
@@ -60,19 +60,34 @@ def test_pseudonitzschia_configs_are_single_model_experiments():
     assert [candidate["name"] for candidate in environment.model.hyperparameter_search.candidates] == [
         "m",
         "m_light",
-        "m_light_slow",
         "m_regularized",
-        "m_short_time",
-        "m_short_time_regularized",
     ]
+
+    assert [environment.problem.random_state, environment_seed7.problem.random_state, environment_seed123.problem.random_state] == [
+        42,
+        7,
+        123,
+    ]
+    assert environment_seed7.run_name == "pseudonitzschia_environment_classification_seed7_from_space"
+    assert environment_seed123.run_name == "pseudonitzschia_environment_classification_seed123_from_space"
+    assert (
+        environment_seed7.model.hyperparameter_search.candidates
+        == environment.model.hyperparameter_search.candidates
+    )
+    assert (
+        environment_seed123.model.hyperparameter_search.candidates
+        == environment.model.hyperparameter_search.candidates
+    )
 
     for config in [optics, environment]:
         assert not hasattr(config.model, "strategy")
-        assert len(config.model.hyperparameter_search.candidates) == 6
         assert all("decision_threshold" not in candidate for candidate in config.model.hyperparameter_search.candidates)
         assert all("decision_class_index" not in candidate for candidate in config.model.hyperparameter_search.candidates)
         assert config.model.sample_weight["mode"] == "balanced"
         assert config.model.augmentation["repetitions"] == 10
+
+    assert len(optics.model.hyperparameter_search.candidates) == 4
+    assert len(environment.model.hyperparameter_search.candidates) == 3
 
 
 def test_unknown_model_keys_are_rejected():

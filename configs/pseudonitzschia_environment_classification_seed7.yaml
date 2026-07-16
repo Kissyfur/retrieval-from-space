@@ -1,4 +1,4 @@
-run_name: pseudonitzschia_environment_classification_from_space
+run_name: pseudonitzschia_environment_classification_seed7_from_space
 run_version: v1
 output_root: outputs/runs
 
@@ -27,7 +27,7 @@ problem:
   soft_label_temperature: 1.0
   soft_label_prior: 0.05
   test_size: 0.15
-  random_state: 42
+  random_state: 7
 
 matchup:
   lat_window: 0.06
