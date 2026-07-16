@@ -930,6 +930,55 @@ def _load_target_values(datasets_dir: Path):
     return ids, values
 
 
+def _jsonable_id(value) -> Any:
+    return value.item() if hasattr(value, "item") else value
+
+
+def _align_target_values_to_feature_groups(
+    datasets_dir: Path,
+    ids: np.ndarray,
+    values: np.ndarray,
+    feature_groups: list[str],
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    group_paths = _feature_group_paths(datasets_dir, feature_groups)
+    missing = [path for path in group_paths if not path.exists()]
+    if missing:
+        raise FileNotFoundError(f"Missing feature group files: {missing}")
+
+    target_ids = np.asarray(ids)
+    group_id_sets: dict[str, set[Any]] = {}
+    group_counts: dict[str, int] = {}
+    common_ids: set[Any] | None = None
+    for path in group_paths:
+        data = xr.load_dataarray(path)
+        if "Id" not in data.coords:
+            raise ValueError(f"Feature group does not have an Id coordinate: {path}")
+        group_ids = np.asarray(data.Id.values).tolist()
+        group_set = set(group_ids)
+        group_id_sets[path.stem] = group_set
+        group_counts[path.stem] = len(group_set)
+        common_ids = group_set if common_ids is None else common_ids & group_set
+
+    common_ids = set(np.asarray(target_ids).tolist()) if common_ids is None else common_ids
+    keep_mask = np.asarray([value in common_ids for value in target_ids.tolist()], dtype=bool)
+    aligned_ids = target_ids[keep_mask]
+    aligned_values = np.asarray(values)[keep_mask]
+    if len(aligned_ids) == 0:
+        raise ValueError(
+            "No target IDs are available in all requested feature groups. "
+            f"Target count: {len(target_ids)}; feature group counts: {group_counts}."
+        )
+
+    dropped_ids = target_ids[~keep_mask]
+    return aligned_ids, aligned_values, {
+        "target_count": int(len(target_ids)),
+        "aligned_count": int(len(aligned_ids)),
+        "dropped_count": int(len(dropped_ids)),
+        "feature_group_counts": group_counts,
+        "dropped_id_examples": [str(_jsonable_id(value)) for value in dropped_ids[:20]],
+    }
+
+
 def _split_data(x, ids, y_target, y_labels, problem_type: str, test_size: float, random_state: int):
     stratify = y_labels if problem_type == "classification" else None
     arrays = [x, ids, y_target]
@@ -1007,6 +1056,12 @@ def train_model(config: PipelineConfig, run_root: str | Path, interactive: bool 
     problem_type = resolve_problem_type(config, interactive=interactive)
     paths = _run_paths(run_root)
     ids, raw_target = _load_target_values(paths["datasets"])
+    ids, raw_target, alignment_report = _align_target_values_to_feature_groups(
+        paths["datasets"],
+        ids,
+        raw_target,
+        config.model.feature_groups,
+    )
     y_target, y_labels, label_values = _prepare_model_target(config, problem_type, raw_target)
     x, group_names, channel_names = _load_matrix_for_groups(
         paths["datasets"],
@@ -1092,6 +1147,7 @@ def train_model(config: PipelineConfig, run_root: str | Path, interactive: bool 
         "input_feature_count": int(x.reshape(len(ids), -1).shape[1]),
         "input_feature_columns": feature_columns,
         "input_channel_names": channel_names,
+        "target_feature_alignment": alignment_report,
         "mask_channel_indices": mask_channel_indices,
         "channel_noise_transforms": channel_noise_transforms,
         "selected_params": selected_params,
@@ -1118,6 +1174,7 @@ def train_model(config: PipelineConfig, run_root: str | Path, interactive: bool 
             "selected_params": selected_params,
             "class_distribution": report["class_distribution"],
             "class_encoding": config.problem.class_encoding,
+            "target_feature_alignment": alignment_report,
         },
     )
     artifacts["predictions"] = _save_predictions(

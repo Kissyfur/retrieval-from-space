@@ -356,3 +356,43 @@ def test_direct_training_saves_single_model_outputs(tmp_path):
     assert (run_root / "metrics" / "confusion_matrix.jpg").exists()
     assert report["feature_groups"] == ["optics"]
     assert "test_metrics" in report
+
+
+def test_training_aligns_targets_to_available_feature_ids(tmp_path):
+    run_root = tmp_path / "run"
+    datasets_dir = run_root / "datasets"
+    datasets_dir.mkdir(parents=True)
+    target_ids = np.arange(6)
+    feature_ids = np.arange(5)
+
+    xr.DataArray(
+        target_ids.astype(float).reshape(-1, 1),
+        dims=("Id", "variable"),
+        coords={"Id": target_ids, "variable": ["target"]},
+    ).to_netcdf(datasets_dir / "target.nc")
+    xr.DataArray(
+        np.column_stack([feature_ids, feature_ids ** 2]).astype(np.float32),
+        dims=("Id", "variable"),
+        coords={"Id": feature_ids, "variable": ["a", "b"]},
+    ).to_netcdf(datasets_dir / "optics.nc")
+
+    config = PipelineConfig(
+        target=TargetConfig(path=str(tmp_path / "unused.csv"), target_column="target"),
+        products=[ProductSpec(name="local", dataset_ids=["local"], feature_group="optics")],
+        problem=ProblemConfig(type="regression", test_size=0.4, random_state=42),
+        model=ModelConfig(
+            family="random_forest",
+            feature_groups=["optics"],
+            params={"n_estimators": 20, "random_state": 42},
+        ),
+    )
+
+    train_model(config, run_root)
+    report = json.loads((run_root / "reports" / "training_report.json").read_text())
+    predictions = pd.read_csv(run_root / "metrics" / "predictions.csv")
+
+    assert report["target_feature_alignment"]["target_count"] == 6
+    assert report["target_feature_alignment"]["aligned_count"] == 5
+    assert report["target_feature_alignment"]["dropped_count"] == 1
+    assert report["target_feature_alignment"]["dropped_id_examples"] == ["5"]
+    assert "5" not in set(predictions["Id"].astype(str))
