@@ -26,7 +26,6 @@ from src.models.training import (
 def test_pseudonitzschia_configs_are_single_model_experiments():
     optics = load_config("configs/pseudonitzschia_optics_classification.yaml")
     environment = load_config("configs/pseudonitzschia_environment_classification.yaml")
-    environment_no_weights = load_config("configs/pseudonitzschia_environment_classification_no_weights.yaml")
 
     assert optics.model.family == "cnn3d"
     assert optics.model.feature_groups == ["optics"]
@@ -45,7 +44,11 @@ def test_pseudonitzschia_configs_are_single_model_experiments():
     assert environment.model.family == "cnn3d"
     assert environment.model.feature_groups == ["nut", "car", "phy"]
     assert environment.problem.test_size == 0.15
+    assert environment.matchup.time_window_days == 7
+    assert environment.preprocess.time_limit == 8
     assert len(environment.products) == 10
+    assert environment.products[0].matchup["time_window_days"] == 7
+    assert all(product.preprocess.get("time_limit") == 8 for product in environment.products)
     assert environment.products[0].preprocess["derived_variables"][0]["name"] == "din"
     assert environment.products[7].preprocess["exclude_from_log1p"] == ["ph"]
     assert [p.name for p in environment.products if p.preprocess.get("add_cloud_land_masks")] == [
@@ -54,15 +57,13 @@ def test_pseudonitzschia_configs_are_single_model_experiments():
     assert len(environment.model.augmentation["noise_std"]["car"]) == 7
     assert len(environment.model.augmentation["noise_std"]["phy"]) == 7
     assert [candidate["name"] for candidate in environment.model.hyperparameter_search.candidates] == [
-        "m",
-        "m_regularized",
+        "m_short_window",
+        "m_short_window_regularized",
+        "shallow_balanced",
+        "wider_shallow",
+        "small_regularized",
     ]
-
-    assert environment_no_weights.run_name == "pseudonitzschia_environment_classification_no_weights_from_space"
-    assert environment_no_weights.problem.random_state == environment.problem.random_state == 42
-    assert environment_no_weights.model.sample_weight["mode"] == "none"
-    assert environment_no_weights.model.hyperparameter_search.candidates == environment.model.hyperparameter_search.candidates
-    assert [product.name for product in environment_no_weights.products] == [product.name for product in environment.products]
+    assert all(max(kernel[-1] for kernel in candidate["kernel_sizes"]) <= 7 for candidate in environment.model.hyperparameter_search.candidates)
 
     for config in [optics, environment]:
         assert not hasattr(config.model, "strategy")
@@ -72,7 +73,7 @@ def test_pseudonitzschia_configs_are_single_model_experiments():
         assert config.model.augmentation["repetitions"] == 10
 
     assert len(optics.model.hyperparameter_search.candidates) == 1
-    assert len(environment.model.hyperparameter_search.candidates) == 2
+    assert len(environment.model.hyperparameter_search.candidates) == 5
 
 
 def test_unknown_model_keys_are_rejected():
@@ -275,21 +276,6 @@ def test_balanced_weights_and_augmentation_preserve_targets():
     assert labels_fit.tolist() == labels.tolist() + np.repeat(labels, 2).tolist()
     assert weights_fit.shape == (12,)
     assert augmentation_info["fit_samples"] == 12
-
-
-def test_none_sample_weight_mode_disables_weights():
-    model = ModelConfig(
-        family="cnn3d",
-        feature_groups=["optics"],
-        sample_weight={"mode": "none"},
-    )
-    labels = np.array([0, 0, 1, 2])
-
-    weights, weight_info = _make_sample_weights("classification", model, labels)
-
-    assert weights is None
-    assert weight_info["enabled"] is False
-    assert weight_info["mode"] == "none"
 
 
 def test_augmentation_does_not_add_noise_to_mask_channels():

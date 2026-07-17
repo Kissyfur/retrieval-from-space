@@ -32,7 +32,7 @@ problem:
 matchup:
   lat_window: 0.06
   lon_window: 0.06
-  time_window_days: 14
+  time_window_days: 7
   lat_threshold: 0.1
   lon_threshold: 0.1
   time_threshold_days: 1
@@ -44,7 +44,7 @@ preprocess:
   add_cloud_land_masks: false
   fillna: 0.0
   min_valid_ratio:
-  time_limit: 16
+  time_limit: 8
   prefix_variables: false
 
 model:
@@ -77,20 +77,44 @@ model:
     scoring: f1_macro
     candidates:
       - dims: [16, 8, 4, 4]
-        kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [5, 5, 15]]
+        kernel_sizes: [[2, 2, 3], [3, 3, 5], [5, 5, 7], [5, 5, 7]]
         output_dim: 3
         dropout: 0.0
         reg_factor: 0.0001
         learning_rate: 0.0001
-        name: m
+        name: m_short_window
         metrics: [accuracy]
       - dims: [16, 8, 4, 4]
-        kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [5, 5, 15]]
+        kernel_sizes: [[2, 2, 3], [3, 3, 5], [5, 5, 7], [5, 5, 7]]
         output_dim: 3
         dropout: 0.15
         reg_factor: 0.0005
         learning_rate: 0.0001
-        name: m_regularized
+        name: m_short_window_regularized
+        metrics: [accuracy]
+      - dims: [16, 8, 4]
+        kernel_sizes: [[2, 2, 3], [3, 3, 5], [5, 5, 7]]
+        output_dim: 3
+        dropout: 0.1
+        reg_factor: 0.0002
+        learning_rate: 0.0001
+        name: shallow_balanced
+        metrics: [accuracy]
+      - dims: [24, 12, 6]
+        kernel_sizes: [[2, 2, 3], [3, 3, 5], [5, 5, 7]]
+        output_dim: 3
+        dropout: 0.1
+        reg_factor: 0.0002
+        learning_rate: 0.0001
+        name: wider_shallow
+        metrics: [accuracy]
+      - dims: [12, 6, 3]
+        kernel_sizes: [[2, 2, 3], [3, 3, 5], [5, 5, 7]]
+        output_dim: 3
+        dropout: 0.2
+        reg_factor: 0.0005
+        learning_rate: 0.0001
+        name: small_regularized
         metrics: [accuracy]
 
 products:
@@ -103,13 +127,13 @@ products:
     matchup: &modeled_matchup
       lat_window: 0.1
       lon_window: 0.1
-      time_window_days: 14
+      time_window_days: 7
       lat_threshold: 10
       lon_threshold: 10
       time_threshold_days: 1
       require_full_time_window: true
     preprocess:
-      time_limit: 16
+      time_limit: 8
       interpolate_dims: [lat, lon, time]
       positive_quantile:
       derived_variables:
@@ -133,7 +157,7 @@ products:
     variables: [chl, phyc]
     matchup: *modeled_matchup
     preprocess:
-      time_limit: 16
+      time_limit: 8
       interpolate_dims: [lat, lon, time]
       positive_quantile:
       log: false
@@ -148,7 +172,7 @@ products:
     variables: [bottomT, thetao]
     matchup: *modeled_matchup
     preprocess:
-      time_limit: 16
+      time_limit: 8
       interpolate_dims: [lat, lon, time]
       positive_quantile:
       log: false
@@ -163,7 +187,7 @@ products:
     variables: [so]
     matchup: *modeled_matchup
     preprocess:
-      time_limit: 16
+      time_limit: 8
       positive_quantile:
       interpolate_dims: [lat, lon, time]
       log: false
@@ -178,7 +202,7 @@ products:
     variables: [uo, vo]
     matchup: *modeled_matchup
     preprocess:
-      time_limit: 16
+      time_limit: 8
       interpolate_dims: [lat, lon, time]
       positive_quantile:
       log: false
@@ -193,7 +217,7 @@ products:
     variables: [zos]
     matchup: *modeled_matchup
     preprocess:
-      time_limit: 16
+      time_limit: 8
       interpolate_dims: [lat, lon, time]
       positive_quantile:
       log: false
@@ -208,7 +232,7 @@ products:
     variables: [mlotst]
     matchup: *modeled_matchup
     preprocess:
-      time_limit: 16
+      time_limit: 8
       interpolate_dims: [lat, lon, time]
       positive_quantile:
       log1p: true
@@ -223,7 +247,7 @@ products:
     variables: [dissic, ph, talk]
     matchup: *modeled_matchup
     preprocess:
-      time_limit: 16
+      time_limit: 8
       interpolate_dims: [lat, lon, time]
       positive_quantile:
       log1p: true
@@ -239,7 +263,7 @@ products:
     variables: [fpco2, spco2]
     matchup: *modeled_matchup
     preprocess:
-      time_limit: 16
+      time_limit: 8
       interpolate_dims: [lat, lon, time]
       positive_quantile:
       log1p: true
@@ -254,7 +278,7 @@ products:
     variables: [nppv, o2]
     matchup: *modeled_matchup
     preprocess:
-      time_limit: 16
+      time_limit: 8
       interpolate_dims: [lat, lon, time]
       positive_quantile:
       log1p: true
