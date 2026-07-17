@@ -42,10 +42,24 @@ def _as_list(value: Any) -> list[Any]:
     return [value]
 
 
-def _select_time(data: xr.DataArray, limit: int | None) -> xr.DataArray:
+def _select_time(data: xr.DataArray, limit: int | None, selection: str = "first") -> xr.DataArray:
     if limit is None or "time" not in data.dims:
         return data
-    return data.isel(time=range(min(limit, data.sizes["time"])))
+    count = data.sizes["time"]
+    limit = min(int(limit), count)
+    selection = selection.lower().replace("-", "_")
+    if selection in {"first", "start"}:
+        return data.isel(time=range(limit))
+    if selection in {"last", "end"}:
+        return data.isel(time=range(count - limit, count))
+    if selection in {"past_to_center", "center_past", "up_to_center"}:
+        end = count // 2 + 1
+        start = max(0, end - limit)
+        return data.isel(time=range(start, end))
+    raise ValueError(
+        "preprocess.time_selection must be 'first', 'last', or 'past_to_center'. "
+        f"Got: {selection}"
+    )
 
 
 def _use_relative_cube_coordinates(data: xr.DataArray) -> xr.DataArray:
@@ -230,7 +244,8 @@ def _prepare_product_array(
     data = data.transpose(*ordered_dims)
 
     time_limit = _option(product, "time_limit", defaults.preprocess.time_limit)
-    data = _select_time(data, time_limit)
+    time_selection = _option(product, "time_selection", defaults.preprocess.time_selection)
+    data = _select_time(data, time_limit, selection=str(time_selection))
 
     min_valid_ratio = _option(product, "min_valid_ratio", defaults.preprocess.min_valid_ratio)
     if min_valid_ratio is not None and "cloud_mask" in data[VARIABLE].values and "land_mask" in data[VARIABLE].values:

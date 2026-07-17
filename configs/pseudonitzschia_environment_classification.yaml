@@ -32,7 +32,7 @@ problem:
 matchup:
   lat_window: 0.06
   lon_window: 0.06
-  time_window_days: 7
+  time_window_days: 14
   lat_threshold: 0.1
   lon_threshold: 0.1
   time_threshold_days: 1
@@ -45,6 +45,7 @@ preprocess:
   fillna: 0.0
   min_valid_ratio:
   time_limit: 8
+  time_selection: past_to_center
   prefix_variables: false
 
 model:
@@ -127,7 +128,7 @@ products:
     matchup: &modeled_matchup
       lat_window: 0.1
       lon_window: 0.1
-      time_window_days: 7
+      time_window_days: 14
       lat_threshold: 10
       lon_threshold: 10
       time_threshold_days: 1

@@ -9,7 +9,7 @@ import pytest
 import xarray as xr
 
 from src.config import ModelConfig, PipelineConfig, ProblemConfig, ProductSpec, TargetConfig, load_config
-from src.data.preprocessing import transform_target
+from src.data.preprocessing import _select_time, transform_target
 from src.data.targets import metadata_to_dataarray
 from src.models.training import (
     ArrayStandardizer,
@@ -44,10 +44,11 @@ def test_pseudonitzschia_configs_are_single_model_experiments():
     assert environment.model.family == "cnn3d"
     assert environment.model.feature_groups == ["nut", "car", "phy"]
     assert environment.problem.test_size == 0.15
-    assert environment.matchup.time_window_days == 7
+    assert environment.matchup.time_window_days == 14
     assert environment.preprocess.time_limit == 8
+    assert environment.preprocess.time_selection == "past_to_center"
     assert len(environment.products) == 10
-    assert environment.products[0].matchup["time_window_days"] == 7
+    assert environment.products[0].matchup["time_window_days"] == 14
     assert all(product.preprocess.get("time_limit") == 8 for product in environment.products)
     assert environment.products[0].preprocess["derived_variables"][0]["name"] == "din"
     assert environment.products[7].preprocess["exclude_from_log1p"] == ["ph"]
@@ -128,6 +129,19 @@ def test_log_target_transform_supports_offset():
     transformed = transform_target(target, "log", offset=100.0)
 
     assert np.allclose(transformed.values, np.log([100.0, 1000.0]))
+
+
+def test_time_selection_can_use_days_before_matchup_center():
+    data = xr.DataArray(
+        np.arange(29),
+        dims=("time",),
+        coords={"time": pd.date_range("2024-01-01", periods=29)},
+    )
+
+    selected = _select_time(data, limit=8, selection="past_to_center")
+
+    assert selected.values.tolist() == list(range(7, 15))
+    assert selected.time.values[-1] == data.time.values[14]
 
 
 def test_cnn_loader_preserves_missing_values_until_standardization(tmp_path):

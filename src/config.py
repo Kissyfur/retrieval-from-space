@@ -130,6 +130,7 @@ class PreprocessConfig:
     fillna: float | None = 0.0
     min_valid_ratio: float | None = None
     time_limit: int | None = None
+    time_selection: str = "first"
     prefix_variables: bool = False
 
     @classmethod
@@ -142,6 +143,7 @@ class PreprocessConfig:
             fillna=data.get("fillna", 0.0),
             min_valid_ratio=data.get("min_valid_ratio"),
             time_limit=data.get("time_limit"),
+            time_selection=str(data.get("time_selection", "first")).lower(),
             prefix_variables=bool(data.get("prefix_variables", False)),
         )
 
