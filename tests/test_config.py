@@ -45,11 +45,11 @@ def test_pseudonitzschia_configs_are_single_model_experiments():
     assert environment.model.feature_groups == ["nut", "car", "phy"]
     assert environment.problem.test_size == 0.15
     assert environment.matchup.time_window_days == 14
-    assert environment.preprocess.time_limit == 8
-    assert environment.preprocess.time_selection == "past_to_center"
+    assert environment.preprocess.time_limit == 29
+    assert environment.preprocess.time_selection == "centered"
     assert len(environment.products) == 10
     assert environment.products[0].matchup["time_window_days"] == 14
-    assert all(product.preprocess.get("time_limit") == 8 for product in environment.products)
+    assert all(product.preprocess.get("time_limit") == 29 for product in environment.products)
     assert environment.products[0].preprocess["derived_variables"][0]["name"] == "din"
     assert environment.products[7].preprocess["exclude_from_log1p"] == ["ph"]
     assert [p.name for p in environment.products if p.preprocess.get("add_cloud_land_masks")] == [
@@ -58,13 +58,12 @@ def test_pseudonitzschia_configs_are_single_model_experiments():
     assert len(environment.model.augmentation["noise_std"]["car"]) == 7
     assert len(environment.model.augmentation["noise_std"]["phy"]) == 7
     assert [candidate["name"] for candidate in environment.model.hyperparameter_search.candidates] == [
-        "m_short_window",
-        "m_short_window_regularized",
+        "m_centered_window",
+        "m_centered_window_regularized",
         "shallow_balanced",
         "wider_shallow",
         "small_regularized",
     ]
-    assert all(max(kernel[-1] for kernel in candidate["kernel_sizes"]) <= 7 for candidate in environment.model.hyperparameter_search.candidates)
 
     for config in [optics, environment]:
         assert not hasattr(config.model, "strategy")
@@ -142,6 +141,19 @@ def test_time_selection_can_use_days_before_matchup_center():
 
     assert selected.values.tolist() == list(range(7, 15))
     assert selected.time.values[-1] == data.time.values[14]
+
+
+def test_time_selection_can_use_symmetric_days_around_matchup_center():
+    data = xr.DataArray(
+        np.arange(29),
+        dims=("time",),
+        coords={"time": pd.date_range("2024-01-01", periods=29)},
+    )
+
+    selected = _select_time(data, limit=29, selection="centered")
+
+    assert selected.values.tolist() == list(range(29))
+    assert selected.time.values[14] == data.time.values[14]
 
 
 def test_cnn_loader_preserves_missing_values_until_standardization(tmp_path):

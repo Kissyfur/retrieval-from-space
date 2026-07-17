@@ -56,8 +56,14 @@ def _select_time(data: xr.DataArray, limit: int | None, selection: str = "first"
         end = count // 2 + 1
         start = max(0, end - limit)
         return data.isel(time=range(start, end))
+    if selection in {"centered", "center", "symmetric"}:
+        center = count // 2
+        start = max(0, center - limit // 2)
+        end = min(count, start + limit)
+        start = max(0, end - limit)
+        return data.isel(time=range(start, end))
     raise ValueError(
-        "preprocess.time_selection must be 'first', 'last', or 'past_to_center'. "
+        "preprocess.time_selection must be 'first', 'last', 'past_to_center', or 'centered'. "
         f"Got: {selection}"
     )
 
