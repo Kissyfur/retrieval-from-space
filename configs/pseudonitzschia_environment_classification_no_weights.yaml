@@ -1,4 +1,4 @@
-run_name: pseudonitzschia_environment_classification_seed123_from_space
+run_name: pseudonitzschia_environment_classification_no_weights_from_space
 run_version: v1
 output_root: outputs/runs
 
@@ -27,7 +27,7 @@ problem:
   soft_label_temperature: 1.0
   soft_label_prior: 0.05
   test_size: 0.15
-  random_state: 123
+  random_state: 42
 
 matchup:
   lat_window: 0.06
@@ -61,8 +61,7 @@ model:
     patience: 3
     validation_split: 0.15
   sample_weight:
-    mode: balanced
-    class_boost: [1.0, 1.0, 1.0]
+    mode: none
   augmentation:
     enabled: true
     repetitions: 10
@@ -83,14 +82,6 @@ model:
         reg_factor: 0.0001
         learning_rate: 0.0001
         name: m
-        metrics: [accuracy]
-      - dims: [16, 8, 4, 4]
-        kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [5, 5, 15]]
-        output_dim: 3
-        dropout: 0.1
-        reg_factor: 0.0002
-        learning_rate: 0.0001
-        name: m_light
         metrics: [accuracy]
       - dims: [16, 8, 4, 4]
         kernel_sizes: [[2, 2, 7], [3, 3, 10], [5, 5, 12], [5, 5, 15]]
