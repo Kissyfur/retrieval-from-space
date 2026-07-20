@@ -37,9 +37,13 @@ def test_pseudonitzschia_configs_are_single_model_experiments():
     assert optics.problem.class_encoding == "soft_probabilities"
     assert optics.problem.target_transform_offset == 100.0
     assert optics.problem.test_size == 0.15
-    assert [candidate["name"] for candidate in optics.model.hyperparameter_search.candidates] == [
-        "wider",
-    ]
+    assert optics.matchup.time_window_days == 14
+    assert optics.preprocess.time_limit == 29
+    assert optics.preprocess.time_selection == "centered"
+    assert all(product.preprocess.get("time_limit") == 29 for product in optics.products)
+    assert optics.products[0].preprocess["log"] is True
+    assert optics.products[0].preprocess["add_cloud_land_masks"] is True
+    assert optics.products[0].preprocess["mask_kinds"] == ["cloud_mask", "land_mask"]
 
     assert environment.model.family == "cnn3d"
     assert environment.model.feature_groups == ["nut", "car", "phy"]
@@ -64,6 +68,7 @@ def test_pseudonitzschia_configs_are_single_model_experiments():
         "wider_shallow",
         "small_regularized",
     ]
+    assert optics.model.hyperparameter_search.candidates == environment.model.hyperparameter_search.candidates
 
     for config in [optics, environment]:
         assert not hasattr(config.model, "strategy")
@@ -72,7 +77,7 @@ def test_pseudonitzschia_configs_are_single_model_experiments():
         assert config.model.sample_weight["mode"] == "balanced"
         assert config.model.augmentation["repetitions"] == 10
 
-    assert len(optics.model.hyperparameter_search.candidates) == 1
+    assert len(optics.model.hyperparameter_search.candidates) == 5
     assert len(environment.model.hyperparameter_search.candidates) == 5
 
 
