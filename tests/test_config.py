@@ -38,27 +38,39 @@ def test_pseudonitzschia_configs_are_single_model_experiments():
     assert optics.problem.target_transform_offset == 100.0
     assert optics.problem.test_size == 0.15
     assert optics.matchup.time_window_days == 14
-    assert optics.preprocess.time_limit == 29
+    assert optics.preprocess.time_limit == 15
     assert optics.preprocess.time_selection == "centered"
-    assert all(product.preprocess.get("time_limit") == 29 for product in optics.products)
+    assert all(not product.matchup for product in optics.products)
+    assert all("time_limit" not in product.preprocess for product in optics.products)
+    assert all("fillna" not in product.preprocess for product in optics.products)
     assert optics.products[0].preprocess["log"] is True
     assert optics.products[0].preprocess["add_cloud_land_masks"] is True
     assert optics.products[0].preprocess["mask_kinds"] == ["cloud_mask", "land_mask"]
+    assert [p.name for p in optics.products if p.preprocess.get("add_cloud_land_masks")] == [
+        "reflectance"
+    ]
 
     assert environment.model.family == "cnn3d"
     assert environment.model.feature_groups == ["nut", "car", "phy"]
     assert environment.problem.test_size == 0.15
     assert environment.matchup.time_window_days == 14
+    assert environment.matchup.lat_window == 0.1
+    assert environment.matchup.lon_window == 0.1
+    assert environment.matchup.lat_threshold == 10
+    assert environment.matchup.lon_threshold == 10
+    assert environment.matchup.require_full_time_window is True
     assert environment.preprocess.time_limit == 29
     assert environment.preprocess.time_selection == "centered"
     assert len(environment.products) == 10
-    assert environment.products[0].matchup["time_window_days"] == 14
-    assert all(product.preprocess.get("time_limit") == 29 for product in environment.products)
+    assert all(not product.matchup for product in environment.products)
+    assert all("time_limit" not in product.preprocess for product in environment.products)
+    assert all("fillna" not in product.preprocess for product in environment.products)
     assert environment.products[0].preprocess["derived_variables"][0]["name"] == "din"
     assert environment.products[7].preprocess["exclude_from_log1p"] == ["ph"]
     assert [p.name for p in environment.products if p.preprocess.get("add_cloud_land_masks")] == [
         "nutrients"
     ]
+    assert environment.products[0].preprocess["mask_kinds"] == ["land_mask"]
     assert len(environment.model.augmentation["noise_std"]["car"]) == 7
     assert len(environment.model.augmentation["noise_std"]["phy"]) == 7
     assert [candidate["name"] for candidate in environment.model.hyperparameter_search.candidates] == [

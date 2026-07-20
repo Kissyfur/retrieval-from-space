@@ -44,7 +44,7 @@ preprocess:
   add_cloud_land_masks: false
   fillna: 0.0
   min_valid_ratio:
-  time_limit: 29
+  time_limit: 15
   time_selection: centered
   prefix_variables: false
 
@@ -129,7 +129,6 @@ products:
       RRS555: "560"
       RRS670: "673"
     preprocess:
-      time_limit: 29
       interpolate_dims: [lat, lon, time]
       positive_quantile: 0.01
       positive_quantile_dims: [time, lat, lon]
@@ -137,30 +136,23 @@ products:
       add_cloud_land_masks: true
       mask_kinds: [cloud_mask, land_mask]
       min_valid_ratio: 0.3
-      fillna: 0.0
 
   - name: inherent_optics
     dataset_id: cmems_obs-oc_med_bgc-optics_my_l3-multi-1km_P1D
     feature_group: optics
     variables: [ADG443, APH443, BBP443]
     preprocess:
-      time_limit: 29
       interpolate_dims: [lat, lon, time]
       positive_quantile: 0.01
       positive_quantile_dims: [time, lat, lon]
       log: true
-      add_cloud_land_masks: false
-      fillna: 0.0
 
   - name: plankton_l3
     dataset_id: cmems_obs-oc_med_bgc-plankton_my_l3-multi-1km_P1D
     feature_group: optics
     variables: [CHL, DIATO]
     preprocess:
-      time_limit: 29
       interpolate_dims: [lat, lon, time]
       positive_quantile: 0.01
       positive_quantile_dims: [time, lat, lon]
       log: true
-      add_cloud_land_masks: false
-      fillna: 0.0
